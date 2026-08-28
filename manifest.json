@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "LinkedIn_Recruiter_CV_Downloader_5.0",
+  "version": "5.0",
+  "description": "Downloads Recruiter resumes into Google Drive. Skips jobs with no new applicants and stops re-trying people who have no resume.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp/z/QybtkDFCi76R/+vDr21jnnGJyOuwc2wzWF0/h2EHWAaNq/aEDDHtDA4ijINqsPCsqSyLCCHZDOHt5TbhpbruoJbD2GXMkzBeXu3EMgcPaIxoUsSrXS77iwICvpVg+JfKnNhW+Hvef0Dri+pTXvXQwkW3g4w3siHHPAyeEd0wpqHw4sR1pBsrPKE9ikq6s9EXBqKA+f6DDF1hOd8mJOvIH+Fgl18S0wlpj20TTrsiojd74oGgD+pIxFgaqVVFvpLLFwKPePguROUVxAerf1XQKavpjrr6YWGlzY3lXQhe1/s0dtqymaqRPyrW4nxW5asexaNFc0c9gy9219fVQQIDAQAB",
+  "action": {
+    "default_title": "Run CV Downloader 5.0 (to Google Drive)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "downloads",
+    "storage",
+    "identity"
+  ],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "https://*.licdn.com/*",
+    "https://www.googleapis.com/*"
+  ],
+  "oauth2": {
+    "client_id": "276076835083-gmpri2h90v67ac5r57n8r9m2g3qne5kp.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/drive"
+    ]
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "update_url": "https://juanroldangg.github.io/linkedin-recruiter-cv-downloader/updates.xml"
+}

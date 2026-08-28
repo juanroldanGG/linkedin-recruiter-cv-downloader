@@ -1,0 +1,6 @@
+# The signing key. If this leaks, someone else can publish updates that install
+# on your team's browsers. If it is LOST, the extension ID changes and every
+# teammate has to be re-pushed. Keep it, never upload it.
+*.pem
+build.crx
+build/
