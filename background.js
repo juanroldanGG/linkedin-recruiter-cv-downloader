@@ -139,15 +139,15 @@ chrome.action.onClicked.addListener(async (tab) => {
     const jobs = allJobs.filter(j => !unchanged(j));
     const skippedJobs = allJobs.filter(unchanged).map(j => j.title);
 
-    const retiredCount = Object.keys(state.noResume).length;
+    // The start popup is subject to the same fixed alert height as the finish
+    // one, so the counts that only matter for diagnosis go to the console.
+    console.log(`${jobs.length} of ${allJobs.length} jobs to visit, ${folders.size} Drive folders; ` +
+      `${done.size} already downloaded, ${Object.keys(state.noResume).length} known to have no resume`);
     await inject(tab.id, m => alert(m), [
       `${appName()} starting.\n\n` +
-      `Jobs to visit: ${jobs.length}\n` +
-      (skippedJobs.length ? `Jobs unchanged since last run: ${skippedJobs.length} (skipped entirely)\n` : "") +
-      `Drive folders found: ${folders.size}\n` +
-      `Already downloaded by the team: ${done.size}\n` +
-      (retiredCount ? `Known to have no resume: ${retiredCount} (not re-tried)\n` : "") +
-      `\nThis tab will move between pages on its own. Please don't touch it.`
+      `${jobs.length} of ${jobsPhrase(allJobs.length)} ${jobs.length === 1 ? "has" : "have"} new applicants.\n` +
+      `Everyone already downloaded will be skipped.\n\n` +
+      `This tab will move between pages on its own. Please don't touch it.`
     ]);
 
     if (jobs.length === 0) {
