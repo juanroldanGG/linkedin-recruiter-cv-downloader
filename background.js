@@ -156,8 +156,16 @@ chrome.action.onClicked.addListener(async (tab) => {
       return;
     }
 
-    const report = [];
+    // Two records per run: `detail` is everything, for the console; `savedPerJob`
+    // is the short list the finish popup shows. Chrome's alert() has a fixed
+    // height and clips silently, so the popup has to stay a fixed small size no
+    // matter how many roles the run covered.
+    const detail = [];
+    const savedPerJob = [];
     const unmatched = [];
+    let toDrive = 0;
+    let toDownloads = 0;
+    let retiredThisRun = 0;
 
     for (const job of jobs) {
       const label = job.title || "Unknown job";
@@ -167,7 +175,7 @@ chrome.action.onClicked.addListener(async (tab) => {
 
       const url = await goToApplicants(tab.id, job.href);
       if (!url) {
-        report.push(`${label}: could not open`);
+        detail.push(`${label}: could not open`);
         continue;
       }
 
@@ -181,7 +189,7 @@ chrome.action.onClicked.addListener(async (tab) => {
       // is also what repairs the gap.
       const vouchedClean = job.jobId && state.jobCounts[job.jobId] !== undefined;
       const res = await inject(tab.id, scrapeResumes, [skipKeys, KNOWN_STREAK_STOP, vouchedClean]);
-      if (!res) { report.push(`${label}: page did not respond`); continue; }
+      if (!res) { detail.push(`${label}: page did not respond`); continue; }
 
       let uploaded = 0, saved = 0, uploadFailed = 0;
       for (const item of res.urls) {
@@ -258,7 +266,11 @@ chrome.action.onClicked.addListener(async (tab) => {
       await chrome.storage.local.set({ doneKeys: Array.from(done) });
 
       console.log(`[${label}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
-      report.push(`${label}: ${uploaded} to Drive` +
+      toDrive += uploaded;
+      toDownloads += saved;
+      retiredThisRun += retired.length;
+      if (uploaded + saved > 0) savedPerJob.push(`${label}: ${uploaded + saved}`);
+      detail.push(`${label}: ${uploaded} to Drive` +
         (saved ? `, ${saved} to Downloads` : "") +
         (res.skipped ? `, ${res.skipped} already had` : "") +
         (emptyHanded.length ? `, ${emptyHanded.length} no resume` : "") +
@@ -268,25 +280,38 @@ chrome.action.onClicked.addListener(async (tab) => {
 
     await writeNoResumeList(state);
     await navigate(tab.id, startUrl);
-    await inject(tab.id, (lines, total, missing, skipped, retiredTotal, listFile) => alert(
-      `CV Downloader 5.0 complete.\n\n${lines.join("\n")}\n\n` +
-      (skipped.length
-        ? `Skipped ${skipped.length} job(s) with no new applicants: ${skipped.join(", ")}\n\n`
+    console.log("Run detail:\n" + detail.join("\n"));
+
+    const noResume = Object.keys(state.noResume).length;
+    const finish =
+      `Done — ${cvsPhrase(toDrive)} saved to Drive.` +
+      (toDownloads ? `\n${toDownloads} went to Downloads instead.` : "") +
+      (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
+      (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
+      (unmatched.length
+        ? `\n\nNo Drive folder for ${jobsPhrase(unmatched.length)} — those went to Downloads. ` +
+          `Add ${capped(unmatched, 3).join(", ")} to ALIASES in background.js.`
         : "") +
-      (missing.length
-        ? `No Drive folder matched: ${missing.join(", ")}\nThose went to Downloads. Add them to ALIASES in background.js.\n\n`
-        : "") +
-      `Remembered ${total} people in total.\n` +
-      (retiredTotal
-        ? `${retiredTotal} people have no resume — see ${listFile} in the CV folder.`
-        : "")
-    ), [report, done.size, unmatched, skippedJobs, Object.keys(state.noResume).length, NO_RESUME_FILE]);
+      (retiredThisRun ? `\n\n${peoplePhrase(retiredThisRun)} never had a resume and won't be opened again.` : "") +
+      (noResume ? `\n\n${peoplePhrase(noResume)} have no resume — see ${NO_RESUME_FILE} in the CV folder.` : "");
+    await inject(tab.id, m => alert(m), [finish]);
   } catch (err) {
     console.error("Run failed:", err);
   } finally {
     clearInterval(keepAlive);
   }
 });
+
+// The popup has to fit in Chrome's alert box whether the run covered one role or
+// thirty, so the job list is capped and the rest is a count. Full detail is in
+// the service worker console.
+const capped = (lines, max = 8) => lines.length <= max
+  ? lines
+  : lines.slice(0, max).concat(`+${lines.length - max} more`);
+
+const jobsPhrase = n => `${n} job${n === 1 ? "" : "s"}`;
+const cvsPhrase = n => `${n} new CV${n === 1 ? "" : "s"}`;
+const peoplePhrase = n => `${n} ${n === 1 ? "person" : "people"}`;
 
 // --- Google Drive -----------------------------------------------------------
 

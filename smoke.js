@@ -27,6 +27,7 @@ const state = {
   pdfUploads: 0,
   navigated: [],
   alerts: [],
+  logs: [],
   downloads: [],
   skipKeysSeen: [],      // what scrapeResumes was told to skip, per call
   vouchedSeen: [],       // whether the job was vouched clean, per call
@@ -86,6 +87,14 @@ const chrome = {
 };
 
 global.alert = msg => state.alerts.push(String(msg));
+
+// Per-job detail moved out of the popup and into the console, so the tests that
+// check it have to watch the console too.
+const realLog = console.log;
+console.log = (...args) => {
+  state.logs.push(args.map(String).join(" "));
+  realLog(...args);
+};
 
 // --- Drive, faked -----------------------------------------------------------
 const ok = body => ({ ok: true, status: 200, json: async () => body, text: async () => "" });
@@ -148,6 +157,7 @@ assert.ok(state.clickHandler, "background.js never registered the toolbar click 
 const run = () => {
   state.navigated = [];
   state.alerts = [];
+  state.logs = [];
   state.skipKeysSeen = [];
   state.vouchedSeen = [];
   state.tabUrl = "https://www.linkedin.com/talent/jobs";
@@ -178,14 +188,15 @@ const withMiss = () => ({
   scrapeResult = withMiss();
   await run();
 
-  const finish = state.alerts.find(a => a.includes("complete")) || "";
+  const finish = state.alerts.find(a => a.startsWith("Done —")) || "";
   assert.ok(finish, "run 1 never reached the finish popup:\n" + state.alerts.join("\n---\n"));
 
   assert.ok(!state.navigated.some(u => u.includes(QUIET.jobId)),
     "a job whose applicant count has not moved must never be opened");
   assert.ok(state.navigated.some(u => u.includes(BUSY.jobId)),
     "the job that gained applicants must be opened");
-  assert.ok(finish.includes("Skipped 1 job"), "the popup should say what it skipped:\n" + finish);
+  assert.ok(finish.includes("1 job had no new applicants"),
+    "the popup should say what it skipped:\n" + finish);
   console.log("ok    a job with an unchanged applicant count is skipped entirely");
 
   assert.strictEqual(state.pdfUploads, 1, "the one new CV should have reached Drive");
@@ -248,8 +259,8 @@ const withMiss = () => ({
 
   assert.ok(state.vouchedSeen[0],
     "a job that finished clean last time may stop early once it has caught up");
-  assert.ok((state.alerts.find(a => a.includes("complete")) || "").includes("stopped early"),
-    "and the finish popup should say so");
+  assert.ok(state.logs.some(l => l.includes("stopped early")),
+    "and the run detail logged to the console should say so:\n" + state.logs.join("\n"));
   console.log("ok    a clean job that gained an applicant is allowed to stop early");
 
   // ---- runs 5 and 6: applicants who attached no CV at all ------------------
