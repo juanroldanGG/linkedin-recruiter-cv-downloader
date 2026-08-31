@@ -36,7 +36,8 @@ const CV_FOLDER_ID = "1RbBTJlBdS5TTRFgXic8XZImlu9tl9qHj";
 const ALIASES = {
   "Software Engineer in Test": "SDET",
   "UX Designer": "UI/UX Designer",
-  "Netsuite Administrator": "Netsuite Admin"
+  "Netsuite Administrator": "Netsuite Admin",
+  "Customer Success Specialist": "Customer Success Manager"
 };
 
 // Files go into <role>/LinkedIn/, not <role>/ — each role folder keeps one
@@ -286,7 +287,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     const noResume = Object.keys(state.noResume).length;
     const finish =
       `Done — ${cvsPhrase(toDrive)} saved to Drive.` +
-      (toDownloads ? `\n${toDownloads} went to Downloads instead.` : "") +
+      (toDownloads ? `\n${toDownloads} went to the Downloads folder instead.` : "") +
       (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
