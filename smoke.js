@@ -52,7 +52,11 @@ let scrapeResult = null;
 
 const chrome = {
   action: { onClicked: { addListener: h => { state.clickHandler = h; } } },
-  runtime: { onInstalled: { addListener: () => {} }, getPlatformInfo: cb => cb({}) },
+  runtime: {
+    onInstalled: { addListener: () => {} },
+    getPlatformInfo: cb => cb({}),
+    getManifest: () => require("./manifest.json")
+  },
   storage: { local: { get: async () => ({ doneKeys: [] }), set: async () => {} } },
   identity: {
     getAuthToken: (opts, cb) => cb("fake-token"),

@@ -139,15 +139,16 @@ chrome.action.onClicked.addListener(async (tab) => {
     const jobs = allJobs.filter(j => !unchanged(j));
     const skippedJobs = allJobs.filter(unchanged).map(j => j.title);
 
-    await inject(tab.id, (n, skipped, prior, folderCount, retired) => alert(
-      `CV Downloader 5.0 starting.\n\n` +
-      `Jobs to visit: ${n}\n` +
-      (skipped ? `Jobs unchanged since last run: ${skipped} (skipped entirely)\n` : "") +
-      `Drive folders found: ${folderCount}\n` +
-      `Already downloaded by the team: ${prior}\n` +
-      (retired ? `Known to have no resume: ${retired} (not re-tried)\n` : "") +
+    const retiredCount = Object.keys(state.noResume).length;
+    await inject(tab.id, m => alert(m), [
+      `${appName()} starting.\n\n` +
+      `Jobs to visit: ${jobs.length}\n` +
+      (skippedJobs.length ? `Jobs unchanged since last run: ${skippedJobs.length} (skipped entirely)\n` : "") +
+      `Drive folders found: ${folders.size}\n` +
+      `Already downloaded by the team: ${done.size}\n` +
+      (retiredCount ? `Known to have no resume: ${retiredCount} (not re-tried)\n` : "") +
       `\nThis tab will move between pages on its own. Please don't touch it.`
-    ), [jobs.length, skippedJobs.length, done.size, folders.size, Object.keys(state.noResume).length]);
+    ]);
 
     if (jobs.length === 0) {
       await inject(tab.id, () => alert(
@@ -308,6 +309,13 @@ chrome.action.onClicked.addListener(async (tab) => {
 const capped = (lines, max = 8) => lines.length <= max
   ? lines
   : lines.slice(0, max).concat(`+${lines.length - max} more`);
+
+// Read the name and version off the manifest so a release bump can never leave a
+// stale number in a popup.
+const appName = () => {
+  const m = chrome.runtime.getManifest();
+  return `${m.name} ${m.version}`;
+};
 
 const jobsPhrase = n => `${n} job${n === 1 ? "" : "s"}`;
 const cvsPhrase = n => `${n} new CV${n === 1 ? "" : "s"}`;
