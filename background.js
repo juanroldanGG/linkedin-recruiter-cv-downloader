@@ -106,8 +106,12 @@ async function run(tab, fullRescan) {
 
   // MV3 kills the service worker after ~30s idle; a 7-job run takes minutes.
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
+  // LinkedIn stops drawing applicants when the screen sleeps, so an overnight
+  // run keeps the display on until it finishes.
+  chrome.power.requestKeepAwake("display");
   const startUrl = tab.url;
   clearedMisses.clear();   // the worker outlives a run; this must not
+  clearedCounts.clear();
 
   try {
     const token = await getToken(true);
@@ -163,11 +167,13 @@ async function run(tab, fullRescan) {
       fullRescan
         ? `${appName()} starting a FULL RESCAN.\n\n` +
           `Every applicant on ${jobsPhrase(allJobs.length)} will be checked again — this takes a lot longer.\n\n` +
-          `This tab will move between pages on its own. Please don't touch it.`
+          `This tab will move between pages on its own. Keep it in front and don't touch it — ` +
+          `LinkedIn doesn't load applicants in a background tab.`
         : `${appName()} starting.\n\n` +
           `${jobs.length} of ${jobsPhrase(allJobs.length)} ${jobs.length === 1 ? "has" : "have"} new applicants.\n` +
           `Everyone already downloaded will be skipped.\n\n` +
-          `This tab will move between pages on its own. Please don't touch it.`
+          `This tab will move between pages on its own. Keep it in front and don't touch it — ` +
+          `LinkedIn doesn't load applicants in a background tab.`
     ]);
 
     if (jobs.length === 0) {
@@ -187,6 +193,7 @@ async function run(tab, fullRescan) {
     let toDrive = 0;
     let toDownloads = 0;
     let retiredThisRun = 0;
+    const incompleteJobs = [];
 
     for (const job of jobs) {
       const label = job.title || "Unknown job";
@@ -194,6 +201,7 @@ async function run(tab, fullRescan) {
       const folderId = roleId ? await getOrCreateChild(roleId, SOURCE_SUBFOLDER) : null;
       if (!folderId) unmatched.push(label);
 
+      await bringToFront(tab);
       const url = await goToApplicants(tab.id, job.href);
       if (!url) {
         detail.push(`${label}: could not open`);
@@ -284,10 +292,20 @@ async function run(tab, fullRescan) {
 
       // Bank the count only after a pass that left nothing hanging. Someone on
       // strike one still needs a second look, so the job stays in the queue.
+      // A read that came up short of the list's own total is never clean, and it
+      // also revokes any earlier certificate — otherwise a closed job, whose
+      // count never moves again, would be skipped forever with people unread.
       const sawSomething = res.urls.length + res.skipped > 0;
-      if (sawSomething && emptyHanded.length === 0 && uploadFailed === 0 &&
+      if (res.incomplete) {
+        incompleteJobs.push(label);
+        if (job.jobId) {
+          delete state.jobCounts[job.jobId];
+          clearedCounts.add(job.jobId);
+        }
+      } else if (sawSomething && emptyHanded.length === 0 && uploadFailed === 0 &&
           job.jobId && job.applicants > 0) {
         state.jobCounts[job.jobId] = job.applicants;
+        clearedCounts.delete(job.jobId);
       }
 
       // Save after every job, not just at the end — a crash on job 5 must not
@@ -307,7 +325,8 @@ async function run(tab, fullRescan) {
         (res.skipped ? `, ${res.skipped} already had` : "") +
         (emptyHanded.length ? `, ${emptyHanded.length} no resume` : "") +
         (retired.length ? ` (${retired.length} retired)` : "") +
-        (res.stoppedEarly ? " [stopped early — rest already had]" : ""));
+        (res.stoppedEarly ? " [stopped early — rest already had]" : "") +
+        (res.incomplete ? ` [read only ${res.read} of ${res.expected ?? "?"} applicants]` : ""));
     }
 
     await writeNoResumeList(state);
@@ -319,6 +338,10 @@ async function run(tab, fullRescan) {
       `Done — ${cvsPhrase(toDrive)} saved to Drive.` +
       (toDownloads ? `\n${toDownloads} went to the Downloads folder instead.` : "") +
       (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
+      (incompleteJobs.length
+        ? `\n\nCouldn't read every applicant on ${capped(incompleteJobs, 3).join(", ")} — ` +
+          `they'll be checked again next run. Keep this tab in front while it runs.`
+        : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
         ? `\n\nNo Drive folder for ${jobsPhrase(unmatched.length)} — those went to Downloads. ` +
@@ -331,7 +354,16 @@ async function run(tab, fullRescan) {
     console.error("Run failed:", err);
   } finally {
     clearInterval(keepAlive);
+    chrome.power.releaseKeepAwake();
   }
+}
+
+// A minimized window or another tab in front means LinkedIn draws nothing, and
+// the page waits until it's visible again. Between jobs, put it back ourselves.
+async function bringToFront(tab) {
+  await chrome.tabs.update(tab.id, { active: true });
+  const win = await chrome.windows.get(tab.windowId);
+  if (win.state === "minimized") await chrome.windows.update(tab.windowId, { state: "normal" });
 }
 
 // The popup has to fit in Chrome's alert box whether the run covered one role or
@@ -510,6 +542,10 @@ const emptyState = () => ({ noResume: {}, misses: {}, jobCounts: {} });
 // earned, so this can never suppress a real one.
 const clearedMisses = new Set();
 
+// Job counts revoked this run because the read came up short. Same reason as
+// above: merging would restore the other side's stale certificate.
+const clearedCounts = new Set();
+
 async function readState() {
   const raw = await readJsonFile(STATE_FILE);
   const s = emptyState();
@@ -537,6 +573,7 @@ async function writeState(state) {
   // is meaningless.
   for (const k of Object.keys(merged.noResume)) delete merged.misses[k];
   for (const k of clearedMisses) { delete merged.misses[k]; delete merged.noResume[k]; }
+  for (const k of clearedCounts) delete merged.jobCounts[k];
 
   await upsertFile(STATE_FILE, "application/json", JSON.stringify(merged));
   state.noResume = merged.noResume;
@@ -719,6 +756,19 @@ async function goToApplicants(tabId, href) {
 async function findAttachmentPdf() {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const PDF_RE = /\/ambry\/|\/dms|document\/media|pdf-analyzed|\.pdf/;
+
+  // A background tab never draws the attachments, which would look exactly
+  // like an applicant with none — a false strike. Wait until it's visible.
+  if (document.visibilityState === "hidden") {
+    await new Promise(resolve => {
+      const onChange = () => {
+        if (document.visibilityState === "hidden") return;
+        document.removeEventListener("visibilitychange", onChange);
+        resolve();
+      };
+      document.addEventListener("visibilitychange", onChange);
+    });
+  }
 
   let buttons = [];
   for (let i = 0; i < 40; i++) {
@@ -969,7 +1019,35 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
     return btn;
   }
 
-  const pageSignature = () => getResumeLinks().map(getRowId).filter(Boolean).join(",");
+  // LinkedIn only draws applicant rows while this tab is on screen, and slows
+  // its timers to a crawl in the background. A hidden tab doesn't fail loudly —
+  // rows just never appear and get silently passed over. So wait it out. An
+  // event, not a timer, because background timers barely tick.
+  const waitVisible = () => document.visibilityState !== "hidden" ? Promise.resolve() :
+    new Promise(resolve => {
+      console.log("Tab is in the background — paused until it's back in front.");
+      const onChange = () => {
+        if (document.visibilityState === "hidden") return;
+        document.removeEventListener("visibilitychange", onChange);
+        setTimeout(resolve, 1000);
+      };
+      document.addEventListener("visibilitychange", onChange);
+    });
+
+  // Every applicant on the page has a slot from the start, drawn or not. Walking
+  // the slots, not whatever happens to be drawn, is what guarantees nobody on a
+  // page is skipped.
+  const slots = () => Array.from(document.querySelectorAll("li[data-test-paginated-profile-list-item-container]"));
+  const slotResumeLink = li =>
+    Array.from(li.querySelectorAll("a, button")).find(e => (e.innerText || "").trim().toLowerCase() === "resume") || null;
+
+  // What the list says it holds, to check what we read against.
+  const totalResults = () => {
+    const el = document.querySelector("[data-test-profile-list-num-results]");
+    const n = el && parseInt(el.textContent.replace(/[^\d]/g, ""), 10);
+    return n > 0 ? n : null;
+  };
+  const pageStart = () => new URL(location.href).searchParams.get("start") || "0";
 
   // Everything above walks the "Resume" controls, so an applicant who attached
   // nothing has no control, is never walked, and was invisible: not downloaded,
@@ -1002,6 +1080,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
   // The list renders after the shell does — wait for it rather than bailing.
   // Wait on the rows, not the Resume links: a page can have rows and no links.
   const rowsPresent = () => document.querySelector("a[href*='/talent/profile/']") !== null;
+  await waitVisible();
   await waitFor(rowsPresent, 20000);
   if (!rowsPresent()) {
     window.open = origOpen;
@@ -1026,27 +1105,99 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
   const seen = new Set();
   let skipped = 0, anon = 0, knownStreak = 0, stoppedEarly = false;
   const MAX_PAGES = 40;
+  const expected = totalResults();
+  let pageTurnFailed = false;
+
+  // One applicant row with its Resume control. Returns true once we've reached
+  // people we already have and may stop.
+  async function handle(link, page) {
+    const id = getRowId(link);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    const key = `${projectId}:${id}`;
+    const name = getName(link, `Applicant ${++anon}`);
+
+    if (skip.has(key)) {
+      skipped++;
+      // A long unbroken run of people we already have means we have reached
+      // the part of the list we did last time. Only trustworthy newest-first.
+      if (canStopEarly && ++knownStreak >= knownStreakStop) {
+        console.log(`Stopping early — ${knownStreak} in a row already downloaded.`);
+        stoppedEarly = true;
+        return true;
+      }
+      return false;
+    }
+    knownStreak = 0;
+    console.log(`[page ${page}] ${name}`);
+
+    const directHref = link.href && PDF_RE.test(link.href) ? link.href : null;
+    if (directHref) { urls.push({ name, url: directHref, key }); return false; }
+
+    // Rare path. Almost every row's Resume control is already a direct link,
+    // handled above without opening anything. This is for the ones that
+    // aren't: open the viewer and watch for the PDF to surface.
+    link.scrollIntoView({ block: "center" });
+    captured = null;
+    link.click();
+
+    let found = null;
+    for (let attempt = 0; attempt < 6 && !found; attempt++) {
+      await waitFor(() => !!(captured || findEmbeddedPdf()), 900, 100);
+      found = captured || findEmbeddedPdf();
+      if (!found) {
+        const dl = findDownloadControl();
+        if (dl) {
+          dl.click();
+          await waitFor(() => !!(captured || findEmbeddedPdf()), 900, 100);
+          found = captured || findEmbeddedPdf();
+        }
+      }
+    }
+
+    if (found) {
+      urls.push({ name, url: found, key });
+    } else {
+      console.log(`Failed to capture PDF for ${name}`);
+      failedItems.push({ name, key, href: getProfileHref(link) });
+    }
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
+    await waitFor(() => !findEmbeddedPdf(), 600, 100);
+    return false;
+  }
 
   for (let page = 1; page <= MAX_PAGES && !stoppedEarly; page++) {
-    const first = getResumeLinks()[0];
-    // Recruiter scrolls the window, not an inner pane, on most layouts.
-    const scroller = (first && findScrollableAncestor(first)) || document.scrollingElement || document.documentElement;
-    let idleScrolls = 0;
+    await waitVisible();
+    const pageSlots = slots();
 
-    for (let guard = 0; guard < 3000; guard++) {
-      // Rows are virtualized: take whatever unhandled row is live right now.
-      const link = getResumeLinks().find(el => {
-        const id = getRowId(el);
-        return id && !seen.has(id);
-      });
-
-      noteRows();
-
-      if (!link) {
+    if (pageSlots.length) {
+      // Bring each slot on screen and wait for its applicant to be drawn before
+      // moving on. Rows far off screen get undrawn again, so each one is dealt
+      // with while it's showing.
+      for (const li of pageSlots) {
+        await waitVisible();
+        li.scrollIntoView({ block: "center" });
+        await waitFor(() => !!li.querySelector("a[href*='/talent/profile/']"), 8000);
+        noteRows();
+        const link = slotResumeLink(li);
+        if (link && await handle(link, page)) break;
+      }
+    } else {
+      // Layout without slots: the old scroll-and-look walk.
+      const first = getResumeLinks()[0];
+      const scroller = (first && findScrollableAncestor(first)) || document.scrollingElement || document.documentElement;
+      let idleScrolls = 0;
+      for (let guard = 0; guard < 3000 && !stoppedEarly; guard++) {
+        await waitVisible();
+        const link = getResumeLinks().find(el => {
+          const id = getRowId(el);
+          return id && !seen.has(id);
+        });
+        noteRows();
+        if (link) { idleScrolls = 0; await handle(link, page); continue; }
         const before = scroller.scrollTop;
         scroller.scrollTop = Math.min(before + scroller.clientHeight * 0.8, scroller.scrollHeight);
-        // Move on as soon as the next rows mount. Same 1.5s ceiling as the old
-        // flat wait, but a list that responds in 150ms now costs 150ms.
         await waitFor(() => getResumeLinks().some(el => {
           const id = getRowId(el);
           return id && !seen.has(id);
@@ -1056,76 +1207,30 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
         } else {
           idleScrolls = 0;
         }
-        continue;
       }
-      idleScrolls = 0;
-
-      const id = getRowId(link);
-      seen.add(id);
-      const key = `${projectId}:${id}`;
-      const name = getName(link, `Applicant ${++anon}`);
-
-      if (skip.has(key)) {
-        skipped++;
-        // A long unbroken run of people we already have means we have reached
-        // the part of the list we did last time. Only trustworthy newest-first.
-        if (canStopEarly && ++knownStreak >= knownStreakStop) {
-          console.log(`Stopping early — ${knownStreak} in a row already downloaded.`);
-          stoppedEarly = true;
-          break;
-        }
-        continue;
-      }
-      knownStreak = 0;
-      console.log(`[page ${page}] ${name}`);
-
-      const directHref = link.href && PDF_RE.test(link.href) ? link.href : null;
-      if (directHref) { urls.push({ name, url: directHref, key }); continue; }
-
-      // Rare path. Almost every row's Resume control is already a direct link,
-      // handled above without opening anything. This is for the ones that
-      // aren't: open the viewer and watch for the PDF to surface.
-      link.scrollIntoView({ block: "center" });
-      captured = null;
-      link.click();
-
-      let found = null;
-      for (let attempt = 0; attempt < 6 && !found; attempt++) {
-        await waitFor(() => !!(captured || findEmbeddedPdf()), 900, 100);
-        found = captured || findEmbeddedPdf();
-        if (!found) {
-          const dl = findDownloadControl();
-          if (dl) {
-            dl.click();
-            await waitFor(() => !!(captured || findEmbeddedPdf()), 900, 100);
-            found = captured || findEmbeddedPdf();
-          }
-        }
-      }
-
-      if (found) {
-        urls.push({ name, url: found, key });
-      } else {
-        console.log(`Failed to capture PDF for ${name}`);
-        failedItems.push({ name, key, href: getProfileHref(link) });
-      }
-
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
-      await waitFor(() => !findEmbeddedPdf(), 600, 100);
     }
 
     noteRows();
     if (stoppedEarly) break;
     const next = getNextPageButton();
     if (!next) break;
-    const before = pageSignature();
-    next.scrollIntoView({ block: "center" });
-    next.click();
-    const changed = await waitFor(() => {
-      const now = pageSignature();
-      return !!now && now !== before;
-    }, 12000);
-    if (!changed) break;
+
+    // A page has turned when the address says so — not when some Resume link
+    // changes, which a page with none of them never does. A slow page gets a
+    // second click before we give up, and giving up is reported, not hidden.
+    const startBefore = pageStart();
+    let turned = false;
+    for (let attempt = 0; attempt < 2 && !turned; attempt++) {
+      await waitVisible();
+      const btn = getNextPageButton();
+      if (!btn) break;
+      btn.scrollIntoView({ block: "center" });
+      btn.click();
+      turned = await waitFor(() => pageStart() !== startBefore, 30000);
+    }
+    if (!turned) { pageTurnFailed = true; break; }
+    await waitFor(() => slots().some(li => li.querySelector("a[href*='/talent/profile/']")) || rowsPresent(), 20000);
+    window.scrollTo(0, 0);
   }
 
   noteRows();
@@ -1140,5 +1245,11 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
       .filter(item => !skip.has(item.key));
 
   if (noCvItems.length) console.log(`${noCvItems.length} applicant(s) with no resume attached.`);
-  return { urls, skipped, failedItems, noCvItems, stoppedEarly };
+
+  // Everyone the list promised, or not? Stopping early skips the rest on
+  // purpose; anything else short of the total means applicants went unread.
+  const read = rowsSeen.size;
+  const incomplete = !stoppedEarly && (pageTurnFailed || (expected !== null && read < expected));
+  if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants${pageTurnFailed ? " — a page would not turn" : ""}.`);
+  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete };
 }

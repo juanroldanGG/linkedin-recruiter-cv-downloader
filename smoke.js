@@ -32,6 +32,8 @@ const state = {
   skipKeysSeen: [],      // what scrapeResumes was told to skip, per call
   vouchedSeen: [],       // whether the job was vouched clean, per call
   attachments: {},       // profile id -> PDF url on their Attachments page
+  windowState: "normal",
+  awake: null,
   tabListener: null,
   tabUrl: "https://www.linkedin.com/talent/jobs"
 };
@@ -54,6 +56,14 @@ let scrapeResult = null;
 const chrome = {
   action: { onClicked: { addListener: h => { state.clickHandler = h; } } },
   contextMenus: { create: () => {}, onClicked: { addListener: h => { state.contextMenuHandler = h; } } },
+  power: {
+    requestKeepAwake: level => { state.awake = level; },
+    releaseKeepAwake: () => { state.awake = null; }
+  },
+  windows: {
+    get: async () => ({ state: state.windowState }),
+    update: async (id, props) => { state.windowState = props.state || state.windowState; }
+  },
   runtime: {
     onInstalled: { addListener: () => {} },
     getPlatformInfo: cb => cb({}),
@@ -66,7 +76,9 @@ const chrome = {
   },
   downloads: { download: o => state.downloads.push(o.filename) },
   tabs: {
-    update: (id, { url }) => {
+    update: (id, { url, active }) => {
+      if (active) state.activated = (state.activated || 0) + 1;
+      if (!url) return Promise.resolve();
       state.navigated.push(url);
       state.tabUrl = url;
       setTimeout(() => state.tabListener && state.tabListener(id, { status: "complete" }), 0);
@@ -172,7 +184,7 @@ const run = () => {
   state.vouchedSeen = [];
   state.tabUrl = "https://www.linkedin.com/talent/jobs";
   // findFileId caches ids for the life of the worker, which is what we want.
-  return state.clickHandler({ id: 1, url: "https://www.linkedin.com/talent/jobs" });
+  return state.clickHandler({ id: 1, windowId: 1, url: "https://www.linkedin.com/talent/jobs" });
 };
 
 const readState = () => JSON.parse(state.driveFiles["_cv-downloader-state-linkedin.json"] || "{}");
@@ -350,7 +362,7 @@ const withMiss = () => ({
   state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = [];
   state.tabUrl = "https://www.linkedin.com/talent/jobs";
   await state.contextMenuHandler({ menuItemId: "full-rescan" },
-    { id: 1, url: "https://www.linkedin.com/talent/jobs" });
+    { id: 1, windowId: 1, url: "https://www.linkedin.com/talent/jobs" });
 
   assert.deepStrictEqual(state.skipKeysSeen[0], [], "a full rescan must skip nobody");
   assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
@@ -360,6 +372,45 @@ const withMiss = () => ({
   assert.ok(!state.driveFiles["_no-resume-candidates-linkedin.csv"].includes("Ghost One"),
     "and the recruiter worklist");
   console.log("ok    a full rescan skips nobody and un-retires anyone whose CV turns up");
+
+  // ---- run 10: the read comes up short of the list's own total --------------
+  // The Customer Success Manager case: 189 read of 261, marked done anyway, and
+  // then skipped forever because a closed job's count never moves. A short read
+  // must never bank, must revoke an old bank, and must say so.
+  s = readState();
+  assert.strictEqual(s.jobCounts[QUIET.jobId], QUIET.applicants, "precondition: the quiet job is banked");
+  state.windowState = "minimized";
+  scrapeResult = {
+    urls: [{ name: "Read One", url: "https://media.example/r1.pdf", key: KEY("read1") }],
+    skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+    expected: 261, read: 189, incomplete: true
+  };
+  state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = []; state.activated = 0;
+  state.tabUrl = "https://www.linkedin.com/talent/jobs";
+  await state.contextMenuHandler({ menuItemId: "full-rescan" },
+    { id: 1, windowId: 1, url: "https://www.linkedin.com/talent/jobs" });
+
+  s = readState();
+  assert.strictEqual(s.jobCounts[QUIET.jobId], undefined,
+    "a short read must revoke the job's earlier done mark, or a closed job is skipped forever");
+  assert.strictEqual(s.jobCounts[BUSY.jobId], undefined, "and must never bank a new one");
+  const shortFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(shortFinish.includes("Couldn't read every applicant"), "the popup must say so:\n" + shortFinish);
+  assert.ok(state.logs.some(l => l.includes("read only 189 of 261")), "and the console must give the numbers");
+  console.log("ok    a read short of the list's total is never marked done, and says so");
+
+  assert.ok(state.activated >= 2, "the tab is brought to the front before each job");
+  assert.strictEqual(state.windowState, "normal", "and a minimized window is restored");
+  assert.strictEqual(state.awake, null, "the screen is allowed to sleep again once the run ends");
+  console.log("ok    the tab is kept in front and the screen awake only while running");
+
+  // A normal run afterwards must open the revoked job again instead of skipping it.
+  scrapeResult = { urls: [], skipped: 5, failedItems: [], noCvItems: [], stoppedEarly: false,
+                   expected: 5, read: 5, incomplete: false };
+  await run();
+  assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
+    "a job whose done mark was revoked must be read again on the next normal run");
+  console.log("ok    the next normal run goes back to the job that was cut short");
 
   console.log("\nsmoke test passed — six runs end to end");
   process.exit(0);
