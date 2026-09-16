@@ -31,6 +31,7 @@ const state = {
   downloads: [],
   skipKeysSeen: [],      // what scrapeResumes was told to skip, per call
   vouchedSeen: [],       // whether the job was vouched clean, per call
+  attachments: {},       // profile id -> PDF url on their Attachments page
   tabListener: null,
   tabUrl: "https://www.linkedin.com/talent/jobs"
 };
@@ -52,7 +53,7 @@ let scrapeResult = null;
 
 const chrome = {
   action: { onClicked: { addListener: h => { state.clickHandler = h; } } },
-  contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
+  contextMenus: { create: () => {}, onClicked: { addListener: h => { state.contextMenuHandler = h; } } },
   runtime: {
     onInstalled: { addListener: () => {} },
     getPlatformInfo: cb => cb({}),
@@ -80,6 +81,10 @@ const chrome = {
     executeScript: async ({ func, args = [] }) => {
       if (func.name === "scrapeJobList") return [{ result: [jobRow(QUIET), jobRow(BUSY)] }];
       if (func.name === "getPageTitle") return [{ result: BUSY.title }];
+      if (func.name === "findAttachmentPdf") {
+        const id = (state.tabUrl.match(/\/profile\/([^/?]+)\/attachments/) || [])[1];
+        return [{ result: state.attachments[id] || null }];
+      }
       if (func.name === "scrapeResumes") {
         state.skipKeysSeen.push(args[0] || []);
         state.vouchedSeen.push(args[2]);
@@ -308,6 +313,53 @@ const withMiss = () => ({
   assert.ok(finalCsv.includes('"Ghost One"'), "the no-CV applicant reaches the recruiter list");
   assert.ok(!finalCsv.includes("Ghost Two"), "and the one who did have a CV does not");
   console.log("ok    the recruiter list names them, with a link to their profile");
+
+  // ---- run 8: the list hides a Resume link, but the profile has the CV ------
+  // Recruiter leaves the link off rows whose applicant did attach one. The
+  // Attachments page is the real record, so that person must be downloaded,
+  // not struck.
+  BUSY.applicants += 1;
+  state.attachments.hidden1 = "https://media.example/hidden1.pdf";
+  const uploadsBefore = state.pdfUploads;
+  scrapeResult = {
+    urls: [], skipped: 3, failedItems: [], stoppedEarly: false,
+    noCvItems: [
+      { name: "Hidden Link", key: KEY("hidden1"), href: "https://www.linkedin.com/talent/profile/hidden1" }
+    ]
+  };
+  await run();
+
+  s = readState();
+  assert.strictEqual(state.pdfUploads, uploadsBefore + 1, "the CV found on the profile should reach Drive");
+  assert.ok(readLedger().keys.includes(KEY("hidden1")), "and they should be remembered as downloaded");
+  assert.strictEqual(s.misses[KEY("hidden1")], undefined, "a CV on the profile is never a strike");
+  assert.ok(state.navigated.some(u => u.includes("/profile/hidden1/attachments")),
+    "the profile's Attachments page should have been checked");
+  console.log("ok    a row missing its Resume link is rescued from the profile's attachments");
+
+  // ---- run 9: full rescan un-retires someone who had a CV all along ---------
+  // Ghost One was retired in run 6. A full rescan skips nobody, finds the CV on
+  // their profile, and must take them off the no-resume list for good.
+  state.attachments.ghost1 = "https://media.example/ghost1.pdf";
+  scrapeResult = {
+    urls: [], skipped: 0, failedItems: [], stoppedEarly: false,
+    noCvItems: [
+      { name: "Ghost One", key: KEY("ghost1"), href: "https://www.linkedin.com/talent/profile/ghost1" }
+    ]
+  };
+  state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = [];
+  state.tabUrl = "https://www.linkedin.com/talent/jobs";
+  await state.contextMenuHandler({ menuItemId: "full-rescan" },
+    { id: 1, url: "https://www.linkedin.com/talent/jobs" });
+
+  assert.deepStrictEqual(state.skipKeysSeen[0], [], "a full rescan must skip nobody");
+  assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
+    "a full rescan must open even a job whose count has not moved");
+  s = readState();
+  assert.ok(!s.noResume[KEY("ghost1")], "someone whose CV turned up must leave the no-resume list");
+  assert.ok(!state.driveFiles["_no-resume-candidates-linkedin.csv"].includes("Ghost One"),
+    "and the recruiter worklist");
+  console.log("ok    a full rescan skips nobody and un-retires anyone whose CV turns up");
 
   console.log("\nsmoke test passed — six runs end to end");
   process.exit(0);

@@ -87,7 +87,7 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "full-rescan") run(tab, true);
+  if (info.menuItemId === "full-rescan") return run(tab, true);
 });
 chrome.action.onClicked.addListener((tab) => run(tab, false));
 
@@ -213,6 +213,21 @@ async function run(tab, fullRescan) {
       const res = await inject(tab.id, scrapeResumes, [skipKeys, KNOWN_STREAK_STOP, vouchedClean]);
       if (!res) { detail.push(`${label}: page did not respond`); continue; }
 
+      // Two ways to come up empty: we opened the viewer and got nothing, or the
+      // row showed no Resume link. The list is not trustworthy on the second —
+      // Recruiter drops the link from rows whose applicant did attach a CV — so
+      // everyone empty-handed gets a look at their profile's Attachments page,
+      // which is the real record, before anyone earns a strike.
+      const emptyHanded = [];
+      for (const item of (res.failedItems || []).concat(res.noCvItems || [])) {
+        const [projectId, profileId] = item.key.split(":");
+        await navigate(tab.id,
+          `https://www.linkedin.com/talent/profile/${profileId}/attachments?project=${projectId}`);
+        const pdf = await inject(tab.id, findAttachmentPdf);
+        if (pdf) res.urls.push({ name: item.name, url: pdf, key: item.key });
+        else emptyHanded.push(item);
+      }
+
       let uploaded = 0, saved = 0, uploadFailed = 0;
       for (const item of res.urls) {
         const filename = `${safeName(item.name) || "resume"}.pdf`;
@@ -239,17 +254,12 @@ async function run(tab, fullRescan) {
         await sleep(400);
       }
 
-      // Two ways to come up empty, treated the same: we opened the viewer and
-      // got nothing, or the row never had a Resume control at all. The second
-      // kind used to be invisible — never downloaded, never counted, never
-      // reviewable.
-      const emptyHanded = (res.failedItems || []).concat(res.noCvItems || []);
-
       // A success wipes any earlier strike. A slow page shouldn't accumulate
       // them across runs and eventually retire somebody who does have a CV.
       for (const item of res.urls) {
         if (item.key && done.has(item.key)) {
           delete state.misses[item.key];
+          delete state.noResume[item.key];   // retired by mistake; a full rescan found the CV
           clearedMisses.add(item.key);
         }
       }
@@ -526,7 +536,7 @@ async function writeState(state) {
   // Retired beats counting: once someone is on the no-resume list, their strike
   // is meaningless.
   for (const k of Object.keys(merged.noResume)) delete merged.misses[k];
-  for (const k of clearedMisses) delete merged.misses[k];
+  for (const k of clearedMisses) { delete merged.misses[k]; delete merged.noResume[k]; }
 
   await upsertFile(STATE_FILE, "application/json", JSON.stringify(merged));
   state.noResume = merged.noResume;
@@ -702,6 +712,50 @@ async function goToApplicants(tabId, href) {
 }
 
 // --- page-world functions ---------------------------------------------------
+
+// On a profile's Attachments page, returns the resume's PDF URL, or null if the
+// applicant really attached nothing. The download button builds a link and
+// clicks it; we catch that link instead of letting the browser save the file.
+async function findAttachmentPdf() {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const PDF_RE = /\/ambry\/|\/dms|document\/media|pdf-analyzed|\.pdf/;
+
+  let buttons = [];
+  for (let i = 0; i < 40; i++) {
+    buttons = Array.from(document.querySelectorAll("[data-test-attachment-download-btn]"));
+    if (buttons.length || /Attachments \(0\)/.test(document.body.innerText)) break;
+    await sleep(250);
+  }
+  if (!buttons.length) return null;
+
+  const labelled = b => {
+    for (let el = b, i = 0; el && i < 5; el = el.parentElement, i++) {
+      if (/\(Resume\)/i.test(el.innerText || "")) return true;
+    }
+    return false;
+  };
+  const pick = buttons.find(labelled) || buttons[0];
+
+  let href = null;
+  const origClick = HTMLAnchorElement.prototype.click;
+  const origOpen = window.open;
+  HTMLAnchorElement.prototype.click = function () {
+    if (PDF_RE.test(this.href)) href = this.href;
+    else return origClick.call(this);
+  };
+  window.open = function (u) {
+    if (u && PDF_RE.test(String(u))) { href = String(u); return null; }
+    return origOpen.apply(window, arguments);
+  };
+  try {
+    pick.click();
+    for (let i = 0; i < 40 && !href; i++) await sleep(150);
+  } finally {
+    HTMLAnchorElement.prototype.click = origClick;
+    window.open = origOpen;
+  }
+  return href;
+}
 
 // Reads the job title shown in the Recruiter header (single-job mode).
 function getPageTitle() {
@@ -946,8 +1000,10 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
   }
 
   // The list renders after the shell does — wait for it rather than bailing.
-  await waitFor(() => getResumeLinks().length > 0, 20000);
-  if (getResumeLinks().length === 0) {
+  // Wait on the rows, not the Resume links: a page can have rows and no links.
+  const rowsPresent = () => document.querySelector("a[href*='/talent/profile/']") !== null;
+  await waitFor(rowsPresent, 20000);
+  if (!rowsPresent()) {
     window.open = origOpen;
     return { urls: [], skipped: 0, failedItems: [], stoppedEarly: false };
   }
@@ -959,7 +1015,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
   if (canStopEarly) {
     // The list is rebuilt from scratch after a re-sort — wait for it, and go
     // back to the top, or we'd start reading from wherever we happened to be.
-    await waitFor(() => getResumeLinks().length > 0, 20000);
+    await waitFor(rowsPresent, 20000);
     window.scrollTo(0, 0);
     await waitFor(() => document.scrollingElement.scrollTop < 5, 1500);
   }
@@ -1075,9 +1131,9 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
   noteRows();
   window.open = origOpen;
 
-  // If not one row on the whole job had a resume control, the page didn't
-  // render properly. Blame the page, not the candidates.
-  const noCvItems = rowsWithResume.size === 0 ? [] :
+  // Rows with no Resume link are only suspects; the caller checks each one's
+  // Attachments page before counting it, so no list-wide sanity guard is needed.
+  const noCvItems =
     Array.from(rowsSeen.entries())
       .filter(([id]) => !rowsWithResume.has(id))
       .map(([id, v]) => ({ name: v.name, key: `${projectId}:${id}`, href: v.href }))
