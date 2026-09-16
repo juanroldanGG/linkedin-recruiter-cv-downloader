@@ -52,6 +52,7 @@ let scrapeResult = null;
 
 const chrome = {
   action: { onClicked: { addListener: h => { state.clickHandler = h; } } },
+  contextMenus: { create: () => {}, onClicked: { addListener: () => {} } },
   runtime: {
     onInstalled: { addListener: () => {} },
     getPlatformInfo: cb => cb({}),

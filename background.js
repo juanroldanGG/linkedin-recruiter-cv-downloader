@@ -76,7 +76,22 @@ const APPLICANTS_RE = /\/talent\/hire\/(\d+)\/discover\/applicants/;
 const HIRE_RE = /\/talent\/hire\/(\d+)/;
 const DRIVE_ARGS = "supportsAllDrives=true&includeItemsFromAllDrives=true";
 
-chrome.action.onClicked.addListener(async (tab) => {
+// Right-click the icon for a full rescan — every applicant on every job gets
+// checked again, ignoring the ledger. Monthly-ish safety net for anyone the
+// incremental run's job-level or streak-stop shortcuts might have skipped.
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: "full-rescan",
+    title: "Full rescan (check everyone, ignore already-downloaded)",
+    contexts: ["action"]
+  });
+});
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "full-rescan") run(tab, true);
+});
+chrome.action.onClicked.addListener((tab) => run(tab, false));
+
+async function run(tab, fullRescan) {
   const onJobsList = tab.url.includes("/talent/jobs");
   const onApplicants = APPLICANTS_RE.test(tab.url);
 
@@ -137,18 +152,22 @@ chrome.action.onClicked.addListener(async (tab) => {
     const unchanged = j =>
       j.jobId && j.applicants > 0 && state.jobCounts[j.jobId] === j.applicants;
 
-    const jobs = allJobs.filter(j => !unchanged(j));
-    const skippedJobs = allJobs.filter(unchanged).map(j => j.title);
+    const jobs = fullRescan ? allJobs : allJobs.filter(j => !unchanged(j));
+    const skippedJobs = fullRescan ? [] : allJobs.filter(unchanged).map(j => j.title);
 
     // The start popup is subject to the same fixed alert height as the finish
     // one, so the counts that only matter for diagnosis go to the console.
     console.log(`${jobs.length} of ${allJobs.length} jobs to visit, ${folders.size} Drive folders; ` +
       `${done.size} already downloaded, ${Object.keys(state.noResume).length} known to have no resume`);
     await inject(tab.id, m => alert(m), [
-      `${appName()} starting.\n\n` +
-      `${jobs.length} of ${jobsPhrase(allJobs.length)} ${jobs.length === 1 ? "has" : "have"} new applicants.\n` +
-      `Everyone already downloaded will be skipped.\n\n` +
-      `This tab will move between pages on its own. Please don't touch it.`
+      fullRescan
+        ? `${appName()} starting a FULL RESCAN.\n\n` +
+          `Every applicant on ${jobsPhrase(allJobs.length)} will be checked again — this takes a lot longer.\n\n` +
+          `This tab will move between pages on its own. Please don't touch it.`
+        : `${appName()} starting.\n\n` +
+          `${jobs.length} of ${jobsPhrase(allJobs.length)} ${jobs.length === 1 ? "has" : "have"} new applicants.\n` +
+          `Everyone already downloaded will be skipped.\n\n` +
+          `This tab will move between pages on its own. Please don't touch it.`
     ]);
 
     if (jobs.length === 0) {
@@ -182,8 +201,9 @@ chrome.action.onClicked.addListener(async (tab) => {
       }
 
       // Retired people are skipped inside the page, so they are never clicked
-      // and never cost the ten seconds it takes to fail.
-      const skipKeys = Array.from(done).concat(Object.keys(state.noResume));
+      // and never cost the ten seconds it takes to fail. A full rescan skips
+      // nobody — that's the whole point.
+      const skipKeys = fullRescan ? [] : Array.from(done).concat(Object.keys(state.noResume));
 
       // A banked count is this job's certificate that last time finished clean.
       // Without one, somebody further down the list may still be unfinished,
@@ -302,7 +322,7 @@ chrome.action.onClicked.addListener(async (tab) => {
   } finally {
     clearInterval(keepAlive);
   }
-});
+}
 
 // The popup has to fit in Chrome's alert box whether the run covered one role or
 // thirty, so the job list is capped and the rest is a count. Full detail is in
