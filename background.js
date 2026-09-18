@@ -297,7 +297,7 @@ async function run(tab, fullRescan) {
       // count never moves again, would be skipped forever with people unread.
       const sawSomething = res.urls.length + res.skipped > 0;
       if (res.incomplete) {
-        incompleteJobs.push(label);
+        incompleteJobs.push(`${label}: read ${res.read} of ${res.expected ?? "?"}`);
         if (job.jobId) {
           delete state.jobCounts[job.jobId];
           clearedCounts.add(job.jobId);
@@ -339,8 +339,8 @@ async function run(tab, fullRescan) {
       (toDownloads ? `\n${toDownloads} went to the Downloads folder instead.` : "") +
       (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
       (incompleteJobs.length
-        ? `\n\nCouldn't read every applicant on ${capped(incompleteJobs, 3).join(", ")} — ` +
-          `they'll be checked again next run. Keep this tab in front while it runs.`
+        ? `\n\nCouldn't read every applicant:\n${capped(incompleteJobs, 4).join("\n")}\n\n` +
+          `They'll be checked again next run. Keep this tab in front while it runs.`
         : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
