@@ -466,6 +466,26 @@ const withMiss = () => ({
   assert.strictEqual(state.pdfUploads, before12 + 2, "and both pages' CVs are taken");
   console.log("ok    each page waits for the people to change, not just the address");
 
+  // ---- run 13: a list longer than LinkedIn will page through ---------------
+  // It serves 400 and no more. That is its limit, not a short read: the job
+  // must count as done, or every run from now on re-reads the same 400.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  scrapeResult = {
+    urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
+    expected: 612, read: 400, incomplete: false, cappedByLinkedIn: true, reason: "", resumeFrom: null
+  };
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  const capFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(capFinish.includes("first 400 applicants"), "the popup explains the limit:\n" + capFinish);
+  assert.ok(!capFinish.includes("Couldn't read every applicant"),
+    "and does not call it a failure:\n" + capFinish);
+  s = readState();
+  assert.strictEqual(s.jobCounts[BUSY.jobId], BUSY.applicants,
+    "the job is marked done, so the next run doesn't re-read the same 400");
+  console.log("ok    a list past LinkedIn's 400 limit is reported, not retried forever");
+
   const log = state.driveFiles["_cv-downloader-last-run-linkedin.log"];
   assert.ok(log, "every run should leave a log in Drive to diagnose a short read");
   assert.ok(/=== .* \(job \d+/.test(log), "with a section per job: " + log);

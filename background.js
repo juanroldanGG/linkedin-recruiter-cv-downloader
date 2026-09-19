@@ -74,6 +74,10 @@ const NO_RESUME_STRIKES = 2;
 // in a row that we already have. Ignored on a relevance sort.
 const KNOWN_STREAK_STOP = 25;
 
+// LinkedIn refuses to page past the 400th applicant of a list. Verified on two
+// jobs of 426 and 612: page 17 serves page 16 again, forever.
+const PAGE_CAP = 400;
+
 // ===========================================================================
 
 const APPLICANTS_RE = /\/talent\/hire\/(\d+)\/discover\/applicants/;
@@ -198,6 +202,7 @@ async function run(tab, fullRescan) {
     let toDownloads = 0;
     let retiredThisRun = 0;
     const incompleteJobs = [];
+    const cappedJobs = [];
     const runLog = [`${jobs.length} of ${allJobs.length} jobs, full rescan: ${!!fullRescan}`];
 
     for (const job of jobs) {
@@ -255,7 +260,8 @@ async function run(tab, fullRescan) {
         res.reason = more.reason;
         res.resumeFrom = more.resumeFrom;
         res.firstId = more.firstId || res.firstId;
-        res.incomplete = more.stoppedEarly ? false
+        res.cappedByLinkedIn = more.cappedByLinkedIn;
+        res.incomplete = (more.stoppedEarly || more.cappedByLinkedIn) ? false
           : (res.expected !== null && res.expected !== undefined ? res.read < res.expected : more.incomplete);
       }
 
@@ -334,6 +340,8 @@ async function run(tab, fullRescan) {
       // also revokes any earlier certificate — otherwise a closed job, whose
       // count never moves again, would be skipped forever with people unread.
       const sawSomething = res.urls.length + res.skipped > 0;
+      if (res.cappedByLinkedIn) cappedJobs.push(`${label}: newest ${res.read} of ${res.expected ?? "?"}`);
+
       if (res.incomplete) {
         incompleteJobs.push(`${label}: read ${res.read} of ${res.expected ?? "?"}` +
           (res.reason ? ` (${res.reason})` : ""));
@@ -385,6 +393,10 @@ async function run(tab, fullRescan) {
       (incompleteJobs.length
         ? `\n\nCouldn't read every applicant:\n${capped(incompleteJobs, 4).join("\n")}\n\n` +
           `They'll be checked again next run. Keep this tab in front while it runs.`
+        : "") +
+      (cappedJobs.length
+        ? `\n\nLinkedIn only lets anyone page through the first 400 applicants, so these were ` +
+          `read newest-first and the older ones can't be reached:\n${capped(cappedJobs, 3).join("\n")}\n`
         : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
@@ -1144,7 +1156,12 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   // Re-sort before reading anyone, so the order we walk is the order we trust.
   // Only worth the two seconds when we're allowed to stop early anyway — on an
   // unvouched job we're reading the whole list regardless.
-  canStopEarly = vouchedClean ? await chooseNewestFirst() : false;
+  // LinkedIn won't page past the 400th applicant. On a longer list, sorting
+  // newest-first is what decides whether those reachable 400 are the ones that
+  // matter — so it's worth doing even when we can't stop early.
+  const overCap = (totalResults() || 0) > PAGE_CAP;
+  const newestFirst = (vouchedClean || overCap) ? await chooseNewestFirst() : false;
+  canStopEarly = vouchedClean && newestFirst;
   if (canStopEarly) {
     // The list is rebuilt from scratch after a re-sort — wait for it, and go
     // back to the top, or we'd start reading from wherever we happened to be.
@@ -1317,9 +1334,14 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const shown = totalResults();
   const expected = (shown !== null && (!applicantsHint || shown <= applicantsHint)) ? shown : null;
   const read = rowsSeen.size;
-  const incomplete = !stoppedEarly && (expected !== null && read < expected) && !resumeFrom;
+  // LinkedIn serves no more than the first 400 of a list, so a longer one can
+  // never be read whole. That's its limit, not a fault of ours: say so once and
+  // let the job count as done, or every future run re-reads the same 400.
+  const cappedByLinkedIn = read >= PAGE_CAP && expected !== null && expected > PAGE_CAP;
+  const incomplete = !stoppedEarly && !cappedByLinkedIn &&
+    (expected !== null && read < expected) && !resumeFrom;
   const reason = incomplete ? (blanks ? "rows never appeared" : "the list ended early") : "";
   if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
   return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason,
-           resumeFrom, firstId: firstRowId(), trace };
+           resumeFrom, cappedByLinkedIn, firstId: firstRowId(), trace };
 }
