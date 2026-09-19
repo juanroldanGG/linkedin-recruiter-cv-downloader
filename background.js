@@ -74,8 +74,11 @@ const NO_RESUME_STRIKES = 2;
 // in a row that we already have. Ignored on a relevance sort.
 const KNOWN_STREAK_STOP = 25;
 
-// LinkedIn refuses to page past the 400th applicant of a list. Verified on two
-// jobs of 426 and 612: page 17 serves page 16 again, forever.
+// LinkedIn stops serving a list a little past its 400th applicant. Verified on
+// a 612-applicant job: pages 1-17 arrive in a second each, and then start=425
+// never comes — the previous 25 people just stay on screen. Treated as "at
+// least this many read, and the list says there are more", not an exact wall,
+// so it still holds if LinkedIn moves it.
 //
 // The page-world scraper can't read this — it runs inside LinkedIn's page,
 // where none of this file's names exist — so it carries the number itself.
@@ -233,41 +236,79 @@ async function run(tab, fullRescan) {
       // and stopping early would walk straight past them. So: full read, which
       // is also what repairs the gap.
       const vouchedClean = job.jobId && state.jobCounts[job.jobId] !== undefined;
-      const res = await inject(tab.id, scrapeResumes,
-        [skipKeys, KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
       runLog.push(`\n=== ${label} (job ${job.jobId}, ${job.applicants} applicants) ===`);
+
+      // One whole list, start to finish. The page reads one batch of 25 and says
+      // where the next one starts; walking by address beats clicking Next, which
+      // isn't always there — and when it wasn't, a 612-applicant job quietly
+      // ended at 25.
+      const readWholeList = async () => {
+        const res = await inject(tab.id, scrapeResumes,
+          [skipKeys, KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
+        if (!res) return null;
+        runLog.push(...(res.trace || []));
+
+        for (let hop = 0; hop < 60 && res.resumeFrom; hop++) {
+          const base = url.split("?")[0];
+          await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
+          const more = await inject(tab.id, scrapeResumes,
+            [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean,
+             job.applicants, res.firstId]);
+          runLog.push(`-- reloaded at start=${res.resumeFrom} --`);
+          if (!more) { runLog.push("reloaded page did not respond"); break; }
+          runLog.push(...(more.trace || []));
+          res.urls.push(...more.urls);
+          res.failedItems = (res.failedItems || []).concat(more.failedItems || []);
+          res.noCvItems = (res.noCvItems || []).concat(more.noCvItems || []);
+          res.skipped += more.skipped;
+          res.read += more.read;
+          res.stoppedEarly = more.stoppedEarly;
+          res.expected = more.expected ?? res.expected;
+          res.reason = more.reason;
+          res.resumeFrom = more.resumeFrom;
+          res.firstId = more.firstId || res.firstId;
+          res.cappedByLinkedIn = more.cappedByLinkedIn;
+          res.incomplete = (more.stoppedEarly || more.cappedByLinkedIn) ? false
+            : (res.expected !== null && res.expected !== undefined ? res.read < res.expected : more.incomplete);
+        }
+        return res;
+      };
+
+      let res = await readWholeList();
+
+      // Recruiter sometimes serves an empty shell — a list with no applicant
+      // rows in it at all — after a long run of page loads has annoyed it. It
+      // looks identical to a job with nobody in it, so the run says nothing and
+      // a 446-applicant job reads zero in silence. Open it once more first.
+      if (res && res.read === 0 && job.applicants > 0) {
+        runLog.push("-- no rows at all; opening the list again --");
+        await bringToFront(tab);
+        await navigate(tab.id, url);
+        res = (await readWholeList()) || res;
+      }
+
       if (!res) {
         runLog.push("page did not respond");
         detail.push(`${label}: page did not respond`);
         continue;
       }
-      runLog.push(...(res.trace || []));
 
-      // The page reads one batch of 25 and says where the next one starts.
-      // Walking the list by address beats clicking Next, which isn't always
-      // there — and when it wasn't, a 612-applicant job quietly ended at 25.
-      for (let hop = 0; hop < 60 && res.resumeFrom; hop++) {
-        const base = url.split("?")[0];
-        await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
-        const more = await inject(tab.id, scrapeResumes,
-          [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean,
-           job.applicants, res.firstId]);
-        runLog.push(`-- reloaded at start=${res.resumeFrom} --`);
-        if (!more) { runLog.push("reloaded page did not respond"); break; }
-        runLog.push(...(more.trace || []));
-        res.urls.push(...more.urls);
-        res.failedItems = (res.failedItems || []).concat(more.failedItems || []);
-        res.noCvItems = (res.noCvItems || []).concat(more.noCvItems || []);
-        res.skipped += more.skipped;
-        res.read += more.read;
-        res.stoppedEarly = more.stoppedEarly;
-        res.expected = more.expected ?? res.expected;
-        res.reason = more.reason;
-        res.resumeFrom = more.resumeFrom;
-        res.firstId = more.firstId || res.firstId;
-        res.cappedByLinkedIn = more.cappedByLinkedIn;
-        res.incomplete = (more.stoppedEarly || more.cappedByLinkedIn) ? false
-          : (res.expected !== null && res.expected !== undefined ? res.read < res.expected : more.incomplete);
+      // LinkedIn stops serving a list somewhere past its 400th person: the page
+      // we ask for never arrives and the one before it stays on screen. That is
+      // its own limit, not a short read here — and calling it one made every
+      // future run re-walk the same seventeen pages, while telling the recruiter
+      // something had gone wrong when nothing had. Only the caller can see this:
+      // it holds the running total, and a single page of 25 never reaches 400.
+      if (res.incomplete && res.read >= PAGE_CAP && res.expected > res.read) {
+        res.cappedByLinkedIn = true;
+        res.incomplete = false;
+      }
+
+      // Nobody read at all, on a job that has applicants, is a failure whatever
+      // the page thought — say so instead of banking it as a quiet success.
+      if (res.read === 0 && job.applicants > 0) {
+        res.incomplete = true;
+        res.reason = res.reason || "the list never appeared";
       }
 
       // Two ways to come up empty: we opened the viewer and got nothing, or the
@@ -400,8 +441,8 @@ async function run(tab, fullRescan) {
           `They'll be checked again next run. Keep this tab in front while it runs.`
         : "") +
       (cappedJobs.length
-        ? `\n\nLinkedIn only lets anyone page through the first 400 applicants, so these were ` +
-          `read newest-first and the older ones can't be reached:\n${capped(cappedJobs, 3).join("\n")}\n`
+        ? `\n\nLinkedIn only lets anyone page through the first 400 or so applicants, so these ` +
+          `were read newest-first and the older ones can't be reached:\n${capped(cappedJobs, 3).join("\n")}\n`
         : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
@@ -1314,7 +1355,11 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     const sane = shownNow !== null && (!applicantsHint || shownNow <= applicantsHint);
     const more = pageSlots.length > 0 && (!sane || here + pageSlots.length < shownNow);
     resumeFrom = (!stoppedEarly && more) ? here + pageSlots.length : null;
-    if (!resumeFrom) trace.push(`page ${page}: end of list (start=${here}, slots=${pageSlots.length})`);
+    // Say which of the two it was. "End of list" on a page that actually
+    // stopped early sent a diagnosis down the wrong road once already.
+    if (!resumeFrom) trace.push(stoppedEarly
+      ? `page ${page}: stopped early — ${knownStreakStop} in a row already downloaded`
+      : `page ${page}: end of list (start=${here}, slots=${pageSlots.length})`);
   }
 
   noteRows();
@@ -1339,12 +1384,12 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const shown = totalResults();
   const expected = (shown !== null && (!applicantsHint || shown <= applicantsHint)) ? shown : null;
   const read = rowsSeen.size;
-  // LinkedIn serves no more than the first 400 of a list, so a longer one can
-  // never be read whole. That's its limit, not a fault of ours: say so once and
-  // let the job count as done, or every future run re-reads the same 400.
-  const cappedByLinkedIn = read >= 400 && expected !== null && expected > 400;   // PAGE_CAP
-  const incomplete = !stoppedEarly && !cappedByLinkedIn &&
-    (expected !== null && read < expected) && !resumeFrom;
+  // Whether the list runs past what LinkedIn will page through is the caller's
+  // to judge, not this page's: it keeps the running total across pages, and one
+  // page of 25 can never reach the limit on its own. Deciding it here looked
+  // right and was always false.
+  const cappedByLinkedIn = false;
+  const incomplete = !stoppedEarly && (expected !== null && read < expected) && !resumeFrom;
   const reason = incomplete ? (blanks ? "rows never appeared" : "the list ended early") : "";
   if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
   return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason,

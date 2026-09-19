@@ -496,24 +496,70 @@ const withMiss = () => ({
   console.log("ok    each page waits for the people to change, not just the address");
 
   // ---- run 13: a list longer than LinkedIn will page through ---------------
-  // It serves 400 and no more. That is its limit, not a short read: the job
-  // must count as done, or every run from now on re-reads the same 400.
+  // It serves 400-odd and then simply stops answering: the page asked for never
+  // arrives and the previous one stays on screen. The page itself can't tell
+  // that apart from a genuine failure — it only ever sees its own 25 — so the
+  // caller has to, from the running total. It must count as done, or every run
+  // from now on re-walks the same seventeen pages and cries failure each time.
   BUSY.applicants += 1; QUIET.applicants += 1;
-  scrapeResult = {
-    urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
-    expected: 612, read: 400, incomplete: false, cappedByLinkedIn: true, reason: "", resumeFrom: null
-  };
+  state.scrapeQueue = [
+    { urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 612, read: 400, incomplete: false, reason: "", resumeFrom: 400,
+      firstId: "person-page-16" },
+    // What start=425 really returns: nothing, because the list never turned.
+    { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: null, read: 0, incomplete: true, reason: "the next page never loaded",
+      resumeFrom: null, firstId: "person-page-16" }
+  ];
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
 
   const capFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
-  assert.ok(capFinish.includes("first 400 applicants"), "the popup explains the limit:\n" + capFinish);
+  assert.ok(capFinish.includes("first 400"), "the popup explains the limit:\n" + capFinish);
   assert.ok(!capFinish.includes("Couldn't read every applicant"),
     "and does not call it a failure:\n" + capFinish);
   s = readState();
   assert.strictEqual(s.jobCounts[BUSY.jobId], BUSY.applicants,
     "the job is marked done, so the next run doesn't re-read the same 400");
   console.log("ok    a list past LinkedIn's 400 limit is reported, not retried forever");
+
+  // ---- run 14: an empty shell of a list ------------------------------------
+  // Recruiter hands back a page with no applicant rows on it. Reading nobody on
+  // a job that has applicants is a failure; before this it was a silent one —
+  // no popup line, nothing. Try again first, then say so.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [
+    { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: null, read: 0, incomplete: false, reason: "the list never appeared", resumeFrom: null },
+    // Second look, same job: this time the list is there.
+    { urls: [{ name: "Late Riser", url: "https://media.example/l.pdf", key: KEY("late") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 1, read: 1, incomplete: false, reason: "", resumeFrom: null }
+  ];
+  const before14 = state.pdfUploads;
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  assert.strictEqual(state.pdfUploads, before14 + 1,
+    "an empty list is opened a second time, and the CV on it is taken");
+  console.log("ok    a list that came back empty gets a second look");
+
+  // Still empty the second time: that has to reach the popup.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  const empty = () => ({ urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+                         expected: null, read: 0, incomplete: false, reason: "", resumeFrom: null });
+  state.scrapeQueue = [empty(), empty(), empty(), empty()];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  const emptyFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(emptyFinish.includes("Couldn't read every applicant"),
+    "a job that read nobody must be reported, not passed over in silence:\n" + emptyFinish);
+  assert.ok(emptyFinish.includes("the list never appeared"), "with the reason:\n" + emptyFinish);
+  s = readState();
+  assert.strictEqual(s.jobCounts[BUSY.jobId], undefined,
+    "and it must not be banked as done, or it is skipped forever");
+  console.log("ok    a job that read nobody is reported and kept in the queue");
 
   const log = state.driveFiles["_cv-downloader-last-run-linkedin.log"];
   assert.ok(log, "every run should leave a log in Drive to diagnose a short read");
