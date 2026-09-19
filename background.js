@@ -76,6 +76,11 @@ const KNOWN_STREAK_STOP = 25;
 
 // LinkedIn refuses to page past the 400th applicant of a list. Verified on two
 // jobs of 426 and 612: page 17 serves page 16 again, forever.
+//
+// The page-world scraper can't read this — it runs inside LinkedIn's page,
+// where none of this file's names exist — so it carries the number itself.
+// Referencing this constant there cost a whole run: every job died with
+// "page did not respond" and the popup cheerfully reported nothing to do.
 const PAGE_CAP = 400;
 
 // ===========================================================================
@@ -1159,7 +1164,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   // LinkedIn won't page past the 400th applicant. On a longer list, sorting
   // newest-first is what decides whether those reachable 400 are the ones that
   // matter — so it's worth doing even when we can't stop early.
-  const overCap = (totalResults() || 0) > PAGE_CAP;
+  const overCap = (totalResults() || 0) > 400;   // PAGE_CAP — this runs in the page, not here
   const newestFirst = (vouchedClean || overCap) ? await chooseNewestFirst() : false;
   canStopEarly = vouchedClean && newestFirst;
   if (canStopEarly) {
@@ -1337,7 +1342,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   // LinkedIn serves no more than the first 400 of a list, so a longer one can
   // never be read whole. That's its limit, not a fault of ours: say so once and
   // let the job count as done, or every future run re-reads the same 400.
-  const cappedByLinkedIn = read >= PAGE_CAP && expected !== null && expected > PAGE_CAP;
+  const cappedByLinkedIn = read >= 400 && expected !== null && expected > 400;   // PAGE_CAP
   const incomplete = !stoppedEarly && !cappedByLinkedIn &&
     (expected !== null && read < expected) && !resumeFrom;
   const reason = incomplete ? (blanks ? "rows never appeared" : "the list ended early") : "";

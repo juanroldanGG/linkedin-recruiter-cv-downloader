@@ -177,6 +177,35 @@ global.fetch = async (url, opts = {}) => {
 };
 const SOURCE_SUB = "LinkedIn";
 
+// --- the page world can only see itself -------------------------------------
+// Functions injected into LinkedIn's page run there, where nothing from this
+// file exists. Naming one of its constants is valid JavaScript that throws only
+// at the other end, where it surfaces as "page did not respond" — a whole run
+// lost to a name that reads perfectly well here.
+{
+  const backgroundOnly = (src.match(/^const ([A-Z][A-Z0-9_]+)\s*=/gm) || [])
+    .map(line => line.replace(/^const /, "").replace(/\s*=$/, ""));
+  const injected = ["scrapeResumes", "findAttachmentPdf", "scrapeJobList", "getPageTitle"];
+
+  for (const name of injected) {
+    const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
+    assert.ok(start >= 0, `${name} should exist`);
+    let depth = 0, end = start;
+    for (let i = src.indexOf("{", start); i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}" && --depth === 0) { end = i; break; }
+    }
+    const body = src.slice(start, end)
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");     // a comment may name it; only code can throw
+    for (const konst of backgroundOnly) {
+      assert.ok(!new RegExp(`\\b${konst}\\b`).test(body),
+        `${name} runs in LinkedIn's page and cannot see ${konst} — inline the value instead`);
+    }
+  }
+  console.log("ok    nothing injected into the page reaches for an extension-only name");
+}
+
 // --- load and run -----------------------------------------------------------
 new Function("chrome", "fetch", "alert", src)(chrome, global.fetch, global.alert);
 assert.ok(state.clickHandler, "background.js never registered the toolbar click handler");
