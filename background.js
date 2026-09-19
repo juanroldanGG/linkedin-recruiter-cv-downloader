@@ -233,9 +233,10 @@ async function run(tab, fullRescan) {
       }
       runLog.push(...(res.trace || []));
 
-      // A Next button that won't take is the page's problem, not the list's:
-      // reload straight at the next page and keep reading from there.
-      for (let hop = 0; hop < 20 && res.resumeFrom; hop++) {
+      // The page reads one batch of 25 and says where the next one starts.
+      // Walking the list by address beats clicking Next, which isn't always
+      // there — and when it wasn't, a 612-applicant job quietly ended at 25.
+      for (let hop = 0; hop < 60 && res.resumeFrom; hop++) {
         const base = url.split("?")[0];
         await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
         const more = await inject(tab.id, scrapeResumes,
@@ -1046,19 +1047,6 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
       return t === "download" || t.startsWith("download ");
     }) || null;
 
-  function getNextPageButton() {
-    let btn = document.querySelector(
-      'button[aria-label="Next"], button[aria-label="Next page"], a[aria-label="Next"]'
-    );
-    if (!btn) {
-      btn = Array.from(document.querySelectorAll("button, a")).find(el => {
-        const t = (el.innerText || "").trim().toLowerCase();
-        return t === "next" || t === "next ›" || t === "next >";
-      });
-    }
-    if (!btn || btn.disabled || btn.getAttribute("aria-disabled") === "true") return null;
-    return btn;
-  }
 
   // LinkedIn only draws applicant rows while this tab is on screen, and slows
   // its timers to a crawl in the background. A hidden tab doesn't fail loudly —
@@ -1145,9 +1133,8 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const failedItems = [];
   const seen = new Set();
   let skipped = 0, anon = 0, knownStreak = 0, stoppedEarly = false;
-  const MAX_PAGES = 40;
-  let pageTurnFailed = false;
   let resumeFrom = null;
+  let blanks = 0;
   // A page-by-page record of what was on screen, saved to Drive by the caller.
   // Blind guessing at why a read came up short has cost more than this costs.
   const trace = [];
@@ -1211,7 +1198,11 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     return false;
   }
 
-  for (let page = 1; page <= MAX_PAGES && !stoppedEarly; page++) {
+  // One page per call. Paging used to happen here, by clicking Next, and that
+  // button is not always found — which silently ended a 612-applicant job after
+  // 25. The caller now walks the pages by address instead, which can't miss.
+  {
+    const page = Math.floor(Number(pageStart()) / 25) + 1;
     await waitVisible();
     const pageSlots = slots();
     const pageT0 = Date.now();
@@ -1230,7 +1221,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
         if (!li) break;
         li.scrollIntoView({ block: "center" });
         const mounted = await waitFor(() => !!li.querySelector("a[href*='/talent/profile/']"), 8000);
-        mounted ? drawn++ : blank++;
+        mounted ? drawn++ : (blank++, blanks++);
         noteRows();
         const link = slotResumeLink(li);
         if (link && await handle(link, page)) break;
@@ -1268,33 +1259,15 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
       `shows="${(document.querySelector("[data-test-profile-list-num-results]") || {}).textContent || "?"}" ` +
       `${Math.round((Date.now() - pageT0) / 1000)}s`);
 
-    if (stoppedEarly) break;
-    const next = getNextPageButton();
-    if (!next) { trace.push(`page ${page}: no Next button — end of list`); break; }
-
-    // A page has turned when the address says so — not when some Resume link
-    // changes, which a page with none of them never does. A slow page gets a
-    // second click before we give up, and giving up is reported, not hidden.
-    const startBefore = pageStart();
-    let turned = false;
-    for (let attempt = 0; attempt < 2 && !turned; attempt++) {
-      await waitVisible();
-      const btn = getNextPageButton();
-      if (!btn) break;
-      btn.scrollIntoView({ block: "center" });
-      btn.click();
-      turned = await waitFor(() => pageStart() !== startBefore, 30000);
-    }
-    if (!turned) {
-      // Clicking Next can fail for reasons this script can't fix from inside
-      // the page — so hand the caller the offset to reload from and let it
-      // carry on there, rather than quietly ending the job here.
-      pageTurnFailed = true;
-      resumeFrom = Number(startBefore) + (pageSlots.length || 25);
-      break;
-    }
-    await waitFor(() => slots().some(li => li.querySelector("a[href*='/talent/profile/']")) || rowsPresent(), 20000);
-    window.scrollTo(0, 0);
+    // Where the caller should go next: the offset after this page, unless the
+    // list says we've reached its end or we've caught up with people we
+    // already have.
+    const here = Number(pageStart());
+    const shownNow = totalResults();
+    const sane = shownNow !== null && (!applicantsHint || shownNow <= applicantsHint);
+    const more = pageSlots.length > 0 && (!sane || here + pageSlots.length < shownNow);
+    resumeFrom = (!stoppedEarly && more) ? here + pageSlots.length : null;
+    if (!resumeFrom) trace.push(`page ${page}: end of list (start=${here}, slots=${pageSlots.length})`);
   }
 
   noteRows();
@@ -1319,8 +1292,8 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const shown = totalResults();
   const expected = (shown !== null && (!applicantsHint || shown <= applicantsHint)) ? shown : null;
   const read = rowsSeen.size;
-  const incomplete = !stoppedEarly && (pageTurnFailed || (expected !== null && read < expected));
-  const reason = pageTurnFailed ? "a page would not turn" : incomplete ? "rows never appeared" : "";
+  const incomplete = !stoppedEarly && (expected !== null && read < expected) && !resumeFrom;
+  const reason = incomplete ? (blanks ? "rows never appeared" : "the list ended early") : "";
   if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
   return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason, resumeFrom, trace };
 }
