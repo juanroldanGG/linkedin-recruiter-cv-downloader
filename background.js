@@ -240,7 +240,8 @@ async function run(tab, fullRescan) {
         const base = url.split("?")[0];
         await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
         const more = await inject(tab.id, scrapeResumes,
-          [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
+          [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean,
+           job.applicants, res.firstId]);
         runLog.push(`-- reloaded at start=${res.resumeFrom} --`);
         if (!more) { runLog.push("reloaded page did not respond"); break; }
         runLog.push(...(more.trace || []));
@@ -253,6 +254,7 @@ async function run(tab, fullRescan) {
         res.expected = more.expected ?? res.expected;
         res.reason = more.reason;
         res.resumeFrom = more.resumeFrom;
+        res.firstId = more.firstId || res.firstId;
         res.incomplete = more.stoppedEarly ? false
           : (res.expected !== null && res.expected !== undefined ? res.read < res.expected : more.incomplete);
       }
@@ -901,7 +903,7 @@ function scrapeJobList() {
 
 // Scrapes one applicants page.
 // Returns { urls: [{name,url,key}], skipped, failedItems: [{name,key,href}], stoppedEarly }.
-async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicantsHint) {
+async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicantsHint, avoidFirstId) {
   const skip = new Set(skipKeys || []);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const PDF_RE = /\/ambry\/|\/dms|document\/media|pdf-analyzed|\.pdf/;
@@ -1109,11 +1111,34 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   // The list renders after the shell does — wait for it rather than bailing.
   // Wait on the rows, not the Resume links: a page can have rows and no links.
   const rowsPresent = () => document.querySelector("a[href*='/talent/profile/']") !== null;
+  const firstRowId = () => {
+    const a = document.querySelector("li[data-test-paginated-profile-list-item-container] a[href*='/talent/profile/'], a[href*='/talent/profile/']");
+    return a ? ((a.getAttribute("href") || "").match(/\/talent\/profile\/([^/?#]+)/) || [])[1] || null : null;
+  };
   await waitVisible();
   await waitFor(rowsPresent, 20000);
+
+  // Recruiter changes the address the moment you ask for the next page, but
+  // leaves the previous 25 people on screen while it fetches. Reading then
+  // re-reads the same page and calls the rest of the list missing — which is
+  // exactly how a 612-applicant job stopped at 61. So wait for the people to
+  // change, not the address.
+  if (avoidFirstId) {
+    const swapped = await waitFor(() => rowsPresent() && firstRowId() !== avoidFirstId, 30000);
+    if (!swapped) {
+      window.open = origOpen;
+      return { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+               expected: null, read: 0, incomplete: true, reason: "the next page never loaded",
+               resumeFrom: null, firstId: avoidFirstId,
+               trace: [`start=${pageStart()}: still showing the previous page after 30s`] };
+    }
+  }
+
   if (!rowsPresent()) {
     window.open = origOpen;
-    return { urls: [], skipped: 0, failedItems: [], stoppedEarly: false };
+    return { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+             expected: null, read: 0, incomplete: false, reason: "the list never appeared",
+             resumeFrom: null, firstId: null, trace: ["no applicant rows on the page"] };
   }
 
   // Re-sort before reading anyone, so the order we walk is the order we trust.
@@ -1295,5 +1320,6 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const incomplete = !stoppedEarly && (expected !== null && read < expected) && !resumeFrom;
   const reason = incomplete ? (blanks ? "rows never appeared" : "the list ended early") : "";
   if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
-  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason, resumeFrom, trace };
+  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason,
+           resumeFrom, firstId: firstRowId(), trace };
 }

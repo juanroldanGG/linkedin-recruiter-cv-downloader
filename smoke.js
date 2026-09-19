@@ -101,6 +101,7 @@ const chrome = {
         state.skipKeysSeen.push(args[0] || []);
         state.vouchedSeen.push(args[2]);
         state.applicantsHintSeen = args[3];
+        (state.firstIdsSeen = state.firstIdsSeen || []).push(args[4]);
         // A queue lets one job hand back several pages, as a stuck Next does.
         const next = state.scrapeQueue && state.scrapeQueue.length
           ? state.scrapeQueue.shift() : scrapeResult;
@@ -443,6 +444,27 @@ const withMiss = () => ({
   assert.strictEqual(state.applicantsHintSeen, BUSY.applicants,
     "the job's own applicant count is passed in, to catch a bogus list total");
   console.log("ok    the page is told the job's applicant count as a sanity check");
+
+  // Recruiter leaves the old 25 people on screen while the next page loads, so
+  // each page is told who was first on the page before it and must not match.
+  const before12 = state.pdfUploads;
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.firstIdsSeen = [];
+  state.scrapeQueue = [
+    { urls: [{ name: "A", url: "https://media.example/a.pdf", key: KEY("a") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 50, read: 25,
+      incomplete: true, reason: "", resumeFrom: 25, firstId: "person-page-1" },
+    { urls: [{ name: "B", url: "https://media.example/b.pdf", key: KEY("b") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 50, read: 25,
+      incomplete: false, reason: "", resumeFrom: null, firstId: "person-page-2" }
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  assert.deepStrictEqual(state.firstIdsSeen.slice(0, 2), [undefined, "person-page-1"],
+    "page two must be told page one's first person, so it can wait for the list to change");
+  assert.strictEqual(state.pdfUploads, before12 + 2, "and both pages' CVs are taken");
+  console.log("ok    each page waits for the people to change, not just the address");
 
   const log = state.driveFiles["_cv-downloader-last-run-linkedin.log"];
   assert.ok(log, "every run should leave a log in Drive to diagnose a short read");
