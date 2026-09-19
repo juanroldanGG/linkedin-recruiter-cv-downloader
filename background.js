@@ -62,6 +62,10 @@ const STATE_FILE = "_cv-downloader-state-linkedin.json";
 // The worklist of people who have no downloadable resume, for recruiters.
 const NO_RESUME_FILE = "_no-resume-candidates-linkedin.csv";
 
+// Last run's page-by-page record. Overwritten every run; only ever read when a
+// run comes up short and somebody has to work out why.
+const RUN_LOG_FILE = "_cv-downloader-last-run-linkedin.log";
+
 // Misses before someone is retired. Two, not one, so a slow-loading page can
 // never strand a real candidate.
 const NO_RESUME_STRIKES = 2;
@@ -194,6 +198,7 @@ async function run(tab, fullRescan) {
     let toDownloads = 0;
     let retiredThisRun = 0;
     const incompleteJobs = [];
+    const runLog = [`${jobs.length} of ${allJobs.length} jobs, full rescan: ${!!fullRescan}`];
 
     for (const job of jobs) {
       const label = job.title || "Unknown job";
@@ -220,7 +225,13 @@ async function run(tab, fullRescan) {
       const vouchedClean = job.jobId && state.jobCounts[job.jobId] !== undefined;
       const res = await inject(tab.id, scrapeResumes,
         [skipKeys, KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
-      if (!res) { detail.push(`${label}: page did not respond`); continue; }
+      runLog.push(`\n=== ${label} (job ${job.jobId}, ${job.applicants} applicants) ===`);
+      if (!res) {
+        runLog.push("page did not respond");
+        detail.push(`${label}: page did not respond`);
+        continue;
+      }
+      runLog.push(...(res.trace || []));
 
       // A Next button that won't take is the page's problem, not the list's:
       // reload straight at the next page and keep reading from there.
@@ -229,7 +240,9 @@ async function run(tab, fullRescan) {
         await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
         const more = await inject(tab.id, scrapeResumes,
           [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
-        if (!more) break;
+        runLog.push(`-- reloaded at start=${res.resumeFrom} --`);
+        if (!more) { runLog.push("reloaded page did not respond"); break; }
+        runLog.push(...(more.trace || []));
         res.urls.push(...more.urls);
         res.failedItems = (res.failedItems || []).concat(more.failedItems || []);
         res.noCvItems = (res.noCvItems || []).concat(more.noCvItems || []);
@@ -338,6 +351,9 @@ async function run(tab, fullRescan) {
       await writeState(state);
       await chrome.storage.local.set({ doneKeys: Array.from(done) });
 
+      runLog.push(`result: read ${res.read} of ${res.expected ?? "?"}, uploaded ${uploaded}, ` +
+        `skipped ${res.skipped}, no resume ${emptyHanded.length}` +
+        (res.incomplete ? ` — INCOMPLETE (${res.reason})` : ""));
       console.log(`[${label}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
       toDrive += uploaded;
       toDownloads += saved;
@@ -353,6 +369,8 @@ async function run(tab, fullRescan) {
     }
 
     await writeNoResumeList(state);
+    await upsertFile(RUN_LOG_FILE, "text/plain",
+      `${appName()} — run finished ${new Date().toISOString()}\n\n${runLog.join("\n")}\n`);
     await navigate(tab.id, startUrl);
     console.log("Run detail:\n" + detail.join("\n"));
 
@@ -1130,6 +1148,9 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const MAX_PAGES = 40;
   let pageTurnFailed = false;
   let resumeFrom = null;
+  // A page-by-page record of what was on screen, saved to Drive by the caller.
+  // Blind guessing at why a read came up short has cost more than this costs.
+  const trace = [];
 
   // One applicant row with its Resume control. Returns true once we've reached
   // people we already have and may stop.
@@ -1193,6 +1214,9 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   for (let page = 1; page <= MAX_PAGES && !stoppedEarly; page++) {
     await waitVisible();
     const pageSlots = slots();
+    const pageT0 = Date.now();
+    const readBefore = rowsSeen.size;
+    let drawn = 0, blank = 0;
 
     if (pageSlots.length) {
       // Bring each slot on screen and wait for its applicant to be drawn before
@@ -1205,7 +1229,8 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
         const li = slots()[i];
         if (!li) break;
         li.scrollIntoView({ block: "center" });
-        await waitFor(() => !!li.querySelector("a[href*='/talent/profile/']"), 8000);
+        const mounted = await waitFor(() => !!li.querySelector("a[href*='/talent/profile/']"), 8000);
+        mounted ? drawn++ : blank++;
         noteRows();
         const link = slotResumeLink(li);
         if (link && await handle(link, page)) break;
@@ -1238,9 +1263,14 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     }
 
     noteRows();
+    trace.push(`page ${page} start=${pageStart()} slots=${pageSlots.length} drawn=${drawn} ` +
+      `blank=${blank} read=${rowsSeen.size - readBefore} total=${rowsSeen.size} ` +
+      `shows="${(document.querySelector("[data-test-profile-list-num-results]") || {}).textContent || "?"}" ` +
+      `${Math.round((Date.now() - pageT0) / 1000)}s`);
+
     if (stoppedEarly) break;
     const next = getNextPageButton();
-    if (!next) break;
+    if (!next) { trace.push(`page ${page}: no Next button — end of list`); break; }
 
     // A page has turned when the address says so — not when some Resume link
     // changes, which a page with none of them never does. A slow page gets a
@@ -1292,5 +1322,5 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const incomplete = !stoppedEarly && (pageTurnFailed || (expected !== null && read < expected));
   const reason = pageTurnFailed ? "a page would not turn" : incomplete ? "rows never appeared" : "";
   if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
-  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason, resumeFrom };
+  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason, resumeFrom, trace };
 }

@@ -444,6 +444,12 @@ const withMiss = () => ({
     "the job's own applicant count is passed in, to catch a bogus list total");
   console.log("ok    the page is told the job's applicant count as a sanity check");
 
+  const log = state.driveFiles["_cv-downloader-last-run-linkedin.log"];
+  assert.ok(log, "every run should leave a log in Drive to diagnose a short read");
+  assert.ok(/=== .* \(job \d+/.test(log), "with a section per job: " + log);
+  assert.ok(log.includes("result: read"), "and each job's result line: " + log);
+  console.log("ok    every run writes a page-by-page log to Drive");
+
   console.log("\nsmoke test passed — six runs end to end");
   process.exit(0);
 })().catch(err => {
