@@ -218,8 +218,30 @@ async function run(tab, fullRescan) {
       // and stopping early would walk straight past them. So: full read, which
       // is also what repairs the gap.
       const vouchedClean = job.jobId && state.jobCounts[job.jobId] !== undefined;
-      const res = await inject(tab.id, scrapeResumes, [skipKeys, KNOWN_STREAK_STOP, vouchedClean]);
+      const res = await inject(tab.id, scrapeResumes,
+        [skipKeys, KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
       if (!res) { detail.push(`${label}: page did not respond`); continue; }
+
+      // A Next button that won't take is the page's problem, not the list's:
+      // reload straight at the next page and keep reading from there.
+      for (let hop = 0; hop < 20 && res.resumeFrom; hop++) {
+        const base = url.split("?")[0];
+        await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
+        const more = await inject(tab.id, scrapeResumes,
+          [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
+        if (!more) break;
+        res.urls.push(...more.urls);
+        res.failedItems = (res.failedItems || []).concat(more.failedItems || []);
+        res.noCvItems = (res.noCvItems || []).concat(more.noCvItems || []);
+        res.skipped += more.skipped;
+        res.read += more.read;
+        res.stoppedEarly = more.stoppedEarly;
+        res.expected = more.expected ?? res.expected;
+        res.reason = more.reason;
+        res.resumeFrom = more.resumeFrom;
+        res.incomplete = more.stoppedEarly ? false
+          : (res.expected !== null && res.expected !== undefined ? res.read < res.expected : more.incomplete);
+      }
 
       // Two ways to come up empty: we opened the viewer and got nothing, or the
       // row showed no Resume link. The list is not trustworthy on the second —
@@ -297,7 +319,8 @@ async function run(tab, fullRescan) {
       // count never moves again, would be skipped forever with people unread.
       const sawSomething = res.urls.length + res.skipped > 0;
       if (res.incomplete) {
-        incompleteJobs.push(`${label}: read ${res.read} of ${res.expected ?? "?"}`);
+        incompleteJobs.push(`${label}: read ${res.read} of ${res.expected ?? "?"}` +
+          (res.reason ? ` (${res.reason})` : ""));
         if (job.jobId) {
           delete state.jobCounts[job.jobId];
           clearedCounts.add(job.jobId);
@@ -859,7 +882,7 @@ function scrapeJobList() {
 
 // Scrapes one applicants page.
 // Returns { urls: [{name,url,key}], skipped, failedItems: [{name,key,href}], stoppedEarly }.
-async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
+async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicantsHint) {
   const skip = new Set(skipKeys || []);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const PDF_RE = /\/ambry\/|\/dms|document\/media|pdf-analyzed|\.pdf/;
@@ -1105,8 +1128,8 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
   const seen = new Set();
   let skipped = 0, anon = 0, knownStreak = 0, stoppedEarly = false;
   const MAX_PAGES = 40;
-  const expected = totalResults();
   let pageTurnFailed = false;
+  let resumeFrom = null;
 
   // One applicant row with its Resume control. Returns true once we've reached
   // people we already have and may stop.
@@ -1174,9 +1197,13 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
     if (pageSlots.length) {
       // Bring each slot on screen and wait for its applicant to be drawn before
       // moving on. Rows far off screen get undrawn again, so each one is dealt
-      // with while it's showing.
-      for (const li of pageSlots) {
+      // with while it's showing. The list is re-read on every step: Recruiter
+      // rebuilds it mid-page, and holding the first batch of slots would end
+      // the page early on whatever was left.
+      for (let i = 0; i < slots().length; i++) {
         await waitVisible();
+        const li = slots()[i];
+        if (!li) break;
         li.scrollIntoView({ block: "center" });
         await waitFor(() => !!li.querySelector("a[href*='/talent/profile/']"), 8000);
         noteRows();
@@ -1228,7 +1255,14 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
       btn.click();
       turned = await waitFor(() => pageStart() !== startBefore, 30000);
     }
-    if (!turned) { pageTurnFailed = true; break; }
+    if (!turned) {
+      // Clicking Next can fail for reasons this script can't fix from inside
+      // the page — so hand the caller the offset to reload from and let it
+      // carry on there, rather than quietly ending the job here.
+      pageTurnFailed = true;
+      resumeFrom = Number(startBefore) + (pageSlots.length || 25);
+      break;
+    }
     await waitFor(() => slots().some(li => li.querySelector("a[href*='/talent/profile/']")) || rowsPresent(), 20000);
     window.scrollTo(0, 0);
   }
@@ -1248,8 +1282,15 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean) {
 
   // Everyone the list promised, or not? Stopping early skips the rest on
   // purpose; anything else short of the total means applicants went unread.
+  // Read the total at the end, not the start: when the page has only just
+  // opened it can still be showing the project's whole talent pool, whose
+  // count is far bigger than the applicant list we actually walk. A total
+  // larger than the job's own applicant count is that stale number, not ours.
+  const shown = totalResults();
+  const expected = (shown !== null && (!applicantsHint || shown <= applicantsHint)) ? shown : null;
   const read = rowsSeen.size;
   const incomplete = !stoppedEarly && (pageTurnFailed || (expected !== null && read < expected));
-  if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants${pageTurnFailed ? " — a page would not turn" : ""}.`);
-  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete };
+  const reason = pageTurnFailed ? "a page would not turn" : incomplete ? "rows never appeared" : "";
+  if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
+  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason, resumeFrom };
 }

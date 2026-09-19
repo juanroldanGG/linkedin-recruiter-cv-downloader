@@ -100,7 +100,11 @@ const chrome = {
       if (func.name === "scrapeResumes") {
         state.skipKeysSeen.push(args[0] || []);
         state.vouchedSeen.push(args[2]);
-        return [{ result: scrapeResult }];
+        state.applicantsHintSeen = args[3];
+        // A queue lets one job hand back several pages, as a stuck Next does.
+        const next = state.scrapeQueue && state.scrapeQueue.length
+          ? state.scrapeQueue.shift() : scrapeResult;
+        return [{ result: next }];
       }
       func(...args);                       // the inline alert(...) arrows
       return [{ result: null }];
@@ -411,6 +415,34 @@ const withMiss = () => ({
   assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
     "a job whose done mark was revoked must be read again on the next normal run");
   console.log("ok    the next normal run goes back to the job that was cut short");
+
+  // ---- run 11: a Next button that won't take ------------------------------
+  // The page is reloaded straight at the next batch and reading carries on,
+  // instead of the job ending 25 applicants in and being called complete.
+  const before11 = state.pdfUploads;
+  BUSY.applicants += 1; QUIET.applicants += 1;   // so both jobs are worth visiting again
+  state.scrapeQueue = [
+    { urls: [{ name: "Page One", url: "https://media.example/p1.pdf", key: KEY("p1") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 50, read: 25, incomplete: true, reason: "a page would not turn", resumeFrom: 25 },
+    { urls: [{ name: "Page Two", url: "https://media.example/p2.pdf", key: KEY("p2") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 50, read: 25, incomplete: false, reason: "", resumeFrom: null }
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  assert.ok(state.navigated.some(u => /\/discover\/applicants\?start=25$/.test(u)),
+    "it should reload at the next batch:\n" + state.navigated.join("\n"));
+  assert.strictEqual(state.pdfUploads, before11 + 2, "both batches' CVs should reach Drive");
+  const finish11 = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(!finish11.includes("Couldn't read every applicant"),
+    "and with 50 of 50 read the job is complete:\n" + finish11);
+  console.log("ok    a stuck Next button is reloaded past, not treated as the end of the list");
+
+  assert.strictEqual(state.applicantsHintSeen, BUSY.applicants,
+    "the job's own applicant count is passed in, to catch a bogus list total");
+  console.log("ok    the page is told the job's applicant count as a sanity check");
 
   console.log("\nsmoke test passed — six runs end to end");
   process.exit(0);
