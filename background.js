@@ -86,6 +86,16 @@ const KNOWN_STREAK_STOP = 25;
 // "page did not respond" and the popup cheerfully reported nothing to do.
 const PAGE_CAP = 400;
 
+// ...except the stall isn't always at 400. Two runs, two jobs: one stopped at
+// 425, the other at 375, and in both runs the job opened next read nobody at
+// all — twice in a row, including an immediate second look. So this is
+// Recruiter having had enough of being paged, not a fixed limit: it stops
+// answering for a while, and hands back empty lists to whatever asks next.
+// There's no cleverness for that, only waiting. Wait, then ask again.
+const PAGE_STALL_WAIT = 30000;
+const PAGE_STALL_RETRIES = 2;
+const COOLDOWN_WAIT = 60000;
+
 // ===========================================================================
 
 const APPLICANTS_RE = /\/talent\/hire\/(\d+)\/discover\/applicants/;
@@ -213,11 +223,22 @@ async function run(tab, fullRescan) {
     const cappedJobs = [];
     const runLog = [`${jobs.length} of ${allJobs.length} jobs, full rescan: ${!!fullRescan}`];
 
+    // Set when a job ends badly, because the next one then starts on a
+    // Recruiter that is still refusing to serve lists. Both times that happened
+    // the next job read nobody and the run looked like it had simply finished.
+    let restFirst = false;
+
     for (const job of jobs) {
       const label = job.title || "Unknown job";
       const roleId = resolveFolder(label, folders);
       const folderId = roleId ? await getOrCreateChild(roleId, SOURCE_SUBFOLDER) : null;
       if (!folderId) unmatched.push(label);
+
+      if (restFirst) {
+        runLog.push(`\n-- last job came up short; resting ${COOLDOWN_WAIT / 1000}s before the next --`);
+        await sleep(COOLDOWN_WAIT);
+        restFirst = false;
+      }
 
       await bringToFront(tab);
       const url = await goToApplicants(tab.id, job.href);
@@ -248,14 +269,33 @@ async function run(tab, fullRescan) {
         if (!res) return null;
         runLog.push(...(res.trace || []));
 
-        for (let hop = 0; hop < 60 && res.resumeFrom; hop++) {
+        let stalls = 0;
+        for (let hop = 0; hop < 80 && res.resumeFrom; hop++) {
           const base = url.split("?")[0];
-          await navigate(tab.id, `${base}?start=${res.resumeFrom}`);
+          const at = res.resumeFrom;
+          await navigate(tab.id, `${base}?start=${at}`);
           const more = await inject(tab.id, scrapeResumes,
             [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean,
              job.applicants, res.firstId]);
-          runLog.push(`-- reloaded at start=${res.resumeFrom} --`);
+          runLog.push(`-- reloaded at start=${at} --`);
           if (!more) { runLog.push("reloaded page did not respond"); break; }
+
+          // The batch we asked for never arrived. That is not the end of the
+          // list — it's Recruiter refusing for a while — so rest and ask for
+          // the same 25 again. Giving up here is what left a 426-applicant job
+          // stuck at 375, run after run, with nothing to show for fifteen
+          // pages of work. Same address on purpose: the page is still watching
+          // for these exact people to be replaced, and sending it via the top
+          // of the list would satisfy that watch with the wrong 25.
+          if (more.reason === "the next page never loaded" && stalls < PAGE_STALL_RETRIES) {
+            stalls++;
+            runLog.push(...(more.trace || []));
+            runLog.push(`-- resting ${PAGE_STALL_WAIT * stalls / 1000}s and asking for ` +
+              `start=${at} again (try ${stalls} of ${PAGE_STALL_RETRIES}) --`);
+            await sleep(PAGE_STALL_WAIT * stalls);
+            continue;               // same offset, and nothing merged from a page that never came
+          }
+          stalls = 0;
           runLog.push(...(more.trace || []));
           res.urls.push(...more.urls);
           res.failedItems = (res.failedItems || []).concat(more.failedItems || []);
@@ -281,7 +321,8 @@ async function run(tab, fullRescan) {
       // looks identical to a job with nobody in it, so the run says nothing and
       // a 446-applicant job reads zero in silence. Open it once more first.
       if (res && res.read === 0 && job.applicants > 0) {
-        runLog.push("-- no rows at all; opening the list again --");
+        runLog.push(`-- no rows at all; resting ${COOLDOWN_WAIT / 1000}s and opening the list again --`);
+        await sleep(COOLDOWN_WAIT);      // straight back in was tried, and got the same nothing
         await bringToFront(tab);
         await navigate(tab.id, url);
         res = (await readWholeList()) || res;
@@ -389,6 +430,7 @@ async function run(tab, fullRescan) {
       if (res.cappedByLinkedIn) cappedJobs.push(`${label}: newest ${res.read} of ${res.expected ?? "?"}`);
 
       if (res.incomplete) {
+        restFirst = true;
         incompleteJobs.push(`${label}: read ${res.read} of ${res.expected ?? "?"}` +
           (res.reason ? ` (${res.reason})` : ""));
         if (job.jobId) {

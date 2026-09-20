@@ -495,31 +495,66 @@ const withMiss = () => ({
   assert.strictEqual(state.pdfUploads, before12 + 2, "and both pages' CVs are taken");
   console.log("ok    each page waits for the people to change, not just the address");
 
-  // ---- run 13: a list longer than LinkedIn will page through ---------------
-  // It serves 400-odd and then simply stops answering: the page asked for never
-  // arrives and the previous one stays on screen. The page itself can't tell
-  // that apart from a genuine failure — it only ever sees its own 25 — so the
-  // caller has to, from the running total. It must count as done, or every run
-  // from now on re-walks the same seventeen pages and cries failure each time.
+  // What a page that never arrived hands back. Nothing to merge, and the reason
+  // is the one string the caller keys off, so it is spelled once here.
+  const stalled = () => ({ urls: [], skipped: 0, failedItems: [], noCvItems: [],
+    stoppedEarly: false, expected: null, read: 0, incomplete: true,
+    reason: "the next page never loaded", resumeFrom: null, firstId: "person-page-1" });
+  const cleanPage = () => ({ urls: [], skipped: 5, failedItems: [], noCvItems: [],
+    stoppedEarly: false, expected: 5, read: 5, incomplete: false, reason: "", resumeFrom: null });
+
+  // ---- run 13: a batch that doesn't arrive is waited out, not given up on ---
+  // Recruiter stops answering after a long stretch of page-turning. That is not
+  // the end of the list and it passes on its own, so the same 25 are asked for
+  // again after a rest — which is the difference between finishing a job and
+  // abandoning it at 375 of 426 on every single run.
   BUSY.applicants += 1; QUIET.applicants += 1;
+  const before13 = state.pdfUploads;
   state.scrapeQueue = [
-    { urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 612, read: 400, incomplete: false, reason: "", resumeFrom: 400,
-      firstId: "person-page-16" },
-    // What start=425 really returns: nothing, because the list never turned.
-    { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: null, read: 0, incomplete: true, reason: "the next page never loaded",
-      resumeFrom: null, firstId: "person-page-16" }
+    { urls: [], skipped: 25, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 50, read: 25, incomplete: false, reason: "", resumeFrom: 25, firstId: "person-page-1" },
+    stalled(),
+    { urls: [{ name: "Second Wind", url: "https://media.example/s.pdf", key: KEY("wind") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 50, read: 25, incomplete: false, reason: "", resumeFrom: null, firstId: "person-page-2" },
+    cleanPage()
   ];
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
 
+  assert.strictEqual(state.navigated.filter(u => /\?start=25$/.test(u)).length, 2,
+    "the same batch is asked for a second time, not skipped:\n" + state.navigated.join("\n"));
+  assert.strictEqual(state.pdfUploads, before13 + 1, "and the CV it was hiding is taken");
+  const stallFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(!stallFinish.includes("Couldn't read every applicant"),
+    "a job that recovered is not reported as short:\n" + stallFinish);
+  s = readState();
+  assert.strictEqual(s.jobCounts[QUIET.jobId], QUIET.applicants,
+    "and it banks, so it isn't re-read from scratch next time");
+  console.log("ok    a batch that never arrives is waited out and asked for again");
+
+  // ---- run 13b: still nothing after the rests, on a list past 400 ----------
+  // Only then is it LinkedIn's own limit. It must count as done, or every run
+  // from now on re-walks the same sixteen pages and cries failure each time.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [
+    { urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: 612, read: 400, incomplete: false, reason: "", resumeFrom: 400,
+      firstId: "person-page-1" },
+    stalled(), stalled(), stalled(),    // the first ask and both rests
+    cleanPage()
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  assert.strictEqual(state.navigated.filter(u => /\?start=400$/.test(u)).length, 3,
+    "it gives the stall two more chances before believing it:\n" + state.navigated.join("\n"));
   const capFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
   assert.ok(capFinish.includes("first 400"), "the popup explains the limit:\n" + capFinish);
   assert.ok(!capFinish.includes("Couldn't read every applicant"),
     "and does not call it a failure:\n" + capFinish);
   s = readState();
-  assert.strictEqual(s.jobCounts[BUSY.jobId], BUSY.applicants,
+  assert.strictEqual(s.jobCounts[QUIET.jobId], QUIET.applicants,
     "the job is marked done, so the next run doesn't re-read the same 400");
   console.log("ok    a list past LinkedIn's 400 limit is reported, not retried forever");
 
@@ -560,6 +595,14 @@ const withMiss = () => ({
   assert.strictEqual(s.jobCounts[BUSY.jobId], undefined,
     "and it must not be banked as done, or it is skipped forever");
   console.log("ok    a job that read nobody is reported and kept in the queue");
+
+  // The job after a bad one used to start against a Recruiter that was still
+  // refusing, and read nobody for that reason alone. It waits now.
+  assert.ok((state.driveFiles["_cv-downloader-last-run-linkedin.log"] || "")
+    .includes("last job came up short; resting"),
+    "the next job should wait rather than walk into the same wall:\n" +
+    state.driveFiles["_cv-downloader-last-run-linkedin.log"]);
+  console.log("ok    a job that follows a bad one waits before starting");
 
   const log = state.driveFiles["_cv-downloader-last-run-linkedin.log"];
   assert.ok(log, "every run should leave a log in Drive to diagnose a short read");
