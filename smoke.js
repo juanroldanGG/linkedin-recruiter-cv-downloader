@@ -417,7 +417,7 @@ const withMiss = () => ({
   scrapeResult = {
     urls: [{ name: "Read One", url: "https://media.example/r1.pdf", key: KEY("read1") }],
     skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-    expected: 261, read: 189, incomplete: true
+    expected: 261, read: 189, reason: "", slots: 0, shown: 261
   };
   state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = []; state.activated = 0;
   state.tabUrl = "https://www.linkedin.com/talent/jobs";
@@ -440,7 +440,7 @@ const withMiss = () => ({
 
   // A normal run afterwards must open the revoked job again instead of skipping it.
   scrapeResult = { urls: [], skipped: 5, failedItems: [], noCvItems: [], stoppedEarly: false,
-                   expected: 5, read: 5, incomplete: false };
+                   expected: 5, read: 5, reason: "", slots: 5, shown: 5 };
   await run();
   assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
     "a job whose done mark was revoked must be read again on the next normal run");
@@ -454,10 +454,10 @@ const withMiss = () => ({
   state.scrapeQueue = [
     { urls: [{ name: "Page One", url: "https://media.example/p1.pdf", key: KEY("p1") }],
       skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 50, read: 25, incomplete: true, reason: "a page would not turn", resumeFrom: 25 },
+      expected: 50, read: 25, reason: "", slots: 25, shown: 50 },
     { urls: [{ name: "Page Two", url: "https://media.example/p2.pdf", key: KEY("p2") }],
       skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 50, read: 25, incomplete: false, reason: "", resumeFrom: null }
+      expected: 50, read: 25, reason: "", slots: 25, shown: 50 }
   ];
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
@@ -465,6 +465,9 @@ const withMiss = () => ({
   assert.ok(state.navigated.some(u => /\/discover\/applicants\?start=25$/.test(u)),
     "it should reload at the next batch:\n" + state.navigated.join("\n"));
   assert.strictEqual(state.pdfUploads, before11 + 2, "both batches' CVs should reach Drive");
+  assert.ok(!state.navigated.some(u => /\?start=50$/.test(u)),
+    "and with 50 of 50 read it stops, instead of asking for a batch that isn't there:\n" +
+    state.navigated.join("\n"));
   const finish11 = state.alerts.find(a => a.startsWith("Done —")) || "";
   assert.ok(!finish11.includes("Couldn't read every applicant"),
     "and with 50 of 50 read the job is complete:\n" + finish11);
@@ -482,10 +485,10 @@ const withMiss = () => ({
   state.scrapeQueue = [
     { urls: [{ name: "A", url: "https://media.example/a.pdf", key: KEY("a") }],
       skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 50, read: 25,
-      incomplete: true, reason: "", resumeFrom: 25, firstId: "person-page-1" },
+      reason: "", slots: 25, shown: 50, firstId: "person-page-1" },
     { urls: [{ name: "B", url: "https://media.example/b.pdf", key: KEY("b") }],
       skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 50, read: 25,
-      incomplete: false, reason: "", resumeFrom: null, firstId: "person-page-2" }
+      reason: "", slots: 25, shown: 50, firstId: "person-page-2" }
   ];
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
@@ -498,10 +501,10 @@ const withMiss = () => ({
   // What a page that never arrived hands back. Nothing to merge, and the reason
   // is the one string the caller keys off, so it is spelled once here.
   const stalled = () => ({ urls: [], skipped: 0, failedItems: [], noCvItems: [],
-    stoppedEarly: false, expected: null, read: 0, incomplete: true,
-    reason: "the next page never loaded", resumeFrom: null, firstId: "person-page-1" });
+    stoppedEarly: false, expected: null, read: 0, reason: "the next page never loaded",
+    slots: 0, shown: null, firstId: "person-page-1" });
   const cleanPage = () => ({ urls: [], skipped: 5, failedItems: [], noCvItems: [],
-    stoppedEarly: false, expected: 5, read: 5, incomplete: false, reason: "", resumeFrom: null });
+    stoppedEarly: false, expected: 5, read: 5, reason: "", slots: 5, shown: 5 });
 
   // ---- run 13: a batch that doesn't arrive is waited out, not given up on ---
   // Recruiter stops answering after a long stretch of page-turning. That is not
@@ -512,11 +515,11 @@ const withMiss = () => ({
   const before13 = state.pdfUploads;
   state.scrapeQueue = [
     { urls: [], skipped: 25, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 50, read: 25, incomplete: false, reason: "", resumeFrom: 25, firstId: "person-page-1" },
+      expected: 50, read: 25, reason: "", slots: 25, shown: 50, firstId: "person-page-1" },
     stalled(),
     { urls: [{ name: "Second Wind", url: "https://media.example/s.pdf", key: KEY("wind") }],
       skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 50, read: 25, incomplete: false, reason: "", resumeFrom: null, firstId: "person-page-2" },
+      expected: 50, read: 25, reason: "", slots: 25, shown: 50, firstId: "person-page-2" },
     cleanPage()
   ];
   state.navigated = []; state.alerts = []; state.logs = [];
@@ -539,7 +542,7 @@ const withMiss = () => ({
   BUSY.applicants += 1; QUIET.applicants += 1;
   state.scrapeQueue = [
     { urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 612, read: 400, incomplete: false, reason: "", resumeFrom: 400,
+      expected: 612, read: 400, reason: "", slots: 25, shown: 612,
       firstId: "person-page-1" },
     stalled(), stalled(), stalled(),    // the first ask and both rests
     cleanPage()
@@ -547,7 +550,9 @@ const withMiss = () => ({
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
 
-  assert.strictEqual(state.navigated.filter(u => /\?start=400$/.test(u)).length, 3,
+  // The offset is wherever the walk had reached; what matters is that the same
+  // one is asked for three times before the stall is believed.
+  assert.strictEqual(state.navigated.filter(u => /\?start=25$/.test(u)).length, 3,
     "it gives the stall two more chances before believing it:\n" + state.navigated.join("\n"));
   const capFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
   assert.ok(capFinish.includes("first 400"), "the popup explains the limit:\n" + capFinish);
@@ -565,11 +570,11 @@ const withMiss = () => ({
   BUSY.applicants += 1; QUIET.applicants += 1;
   state.scrapeQueue = [
     { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: null, read: 0, incomplete: false, reason: "the list never appeared", resumeFrom: null },
+      expected: null, read: 0, reason: "the list never appeared", slots: 0, shown: null },
     // Second look, same job: this time the list is there.
     { urls: [{ name: "Late Riser", url: "https://media.example/l.pdf", key: KEY("late") }],
       skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-      expected: 1, read: 1, incomplete: false, reason: "", resumeFrom: null }
+      expected: 1, read: 1, reason: "", slots: 1, shown: 1 }
   ];
   const before14 = state.pdfUploads;
   state.navigated = []; state.alerts = []; state.logs = [];
@@ -582,8 +587,9 @@ const withMiss = () => ({
   // Still empty the second time: that has to reach the popup.
   BUSY.applicants += 1; QUIET.applicants += 1;
   const empty = () => ({ urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-                         expected: null, read: 0, incomplete: false, reason: "", resumeFrom: null });
-  state.scrapeQueue = [empty(), empty(), empty(), empty()];
+                         expected: null, read: 0, reason: "", slots: 0, shown: null });
+  // Two jobs, and each gets a first look plus two more after a rest.
+  state.scrapeQueue = [empty(), empty(), empty(), empty(), empty(), empty()];
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
 
@@ -603,6 +609,56 @@ const withMiss = () => ({
     "the next job should wait rather than walk into the same wall:\n" +
     state.driveFiles["_cv-downloader-last-run-linkedin.log"]);
   console.log("ok    a job that follows a bad one waits before starting");
+
+  // ---- run 15: a list whose own total is bigger than the job's count -------
+  // Recruiter shows some jobs a count far bigger than the applicants being
+  // walked, so the total can't be trusted to say where the list ends. The last
+  // page can: it comes back short. Without that, the walk asks for a page past
+  // the end, waits out two rests for a batch that was never coming, and reports
+  // a job that read every one of its 388 applicants as a failure — every run.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [
+    { urls: [], skipped: 25, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: null, read: 25, reason: "", slots: 25, shown: 388, firstId: "p1" },
+    { urls: [], skipped: 13, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: null, read: 13, reason: "", slots: 13, shown: 388, firstId: "p2" },
+    cleanPage()
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  assert.ok(!state.navigated.some(u => /\?start=38$/.test(u)),
+    "a short page is the last page — nothing should be asked for after it:\n" +
+    state.navigated.join("\n"));
+  const shortPageFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(!shortPageFinish.includes("Couldn't read every applicant"),
+    "and the job is finished, not failed:\n" + shortPageFinish);
+  s = readState();
+  assert.strictEqual(s.jobCounts[QUIET.jobId], QUIET.applicants, "so it banks");
+  console.log("ok    a short page ends the list even when its total can't be trusted");
+
+  // ---- run 16: everything read, and then one batch too many ---------------
+  // Same situation, but the list happens to end on a full page, so the walk
+  // can't tell until it asks. The batch never comes — because there was nothing
+  // to send. Waiting that one out twice would be waiting for nothing.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [
+    { urls: [], skipped: 388, failedItems: [], noCvItems: [], stoppedEarly: false,
+      expected: null, read: 388, reason: "", slots: 25, shown: 388, firstId: "p1" },
+    stalled(),
+    cleanPage()
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  assert.strictEqual(state.navigated.filter(u => /\?start=25$/.test(u)).length, 1,
+    "a batch past the end is not waited out and asked for again:\n" + state.navigated.join("\n"));
+  const pastEndFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(!pastEndFinish.includes("Couldn't read every applicant"),
+    "and reaching the end is not a failure:\n" + pastEndFinish);
+  s = readState();
+  assert.strictEqual(s.jobCounts[QUIET.jobId], QUIET.applicants, "so it banks");
+  console.log("ok    a batch asked for past the end of the list is the end, not a failure");
 
   const log = state.driveFiles["_cv-downloader-last-run-linkedin.log"];
   assert.ok(log, "every run should leave a log in Drive to diagnose a short read");

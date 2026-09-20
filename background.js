@@ -96,6 +96,14 @@ const PAGE_STALL_WAIT = 30000;
 const PAGE_STALL_RETRIES = 2;
 const COOLDOWN_WAIT = 60000;
 
+// A breather between jobs even when nothing went wrong. The job Recruiter
+// refuses is usually just the one that came late in a long run — on a six-job
+// run it was the sixth, and it had done seventy page loads by then.
+const JOB_PAUSE = 15000;
+
+// Applicants per page, and the step ?start= moves in.
+const PAGE_SIZE = 25;
+
 // ===========================================================================
 
 const APPLICANTS_RE = /\/talent\/hire\/(\d+)\/discover\/applicants/;
@@ -227,6 +235,7 @@ async function run(tab, fullRescan) {
     // Recruiter that is still refusing to serve lists. Both times that happened
     // the next job read nobody and the run looked like it had simply finished.
     let restFirst = false;
+    let visitedOne = false;
 
     for (const job of jobs) {
       const label = job.title || "Unknown job";
@@ -238,7 +247,10 @@ async function run(tab, fullRescan) {
         runLog.push(`\n-- last job came up short; resting ${COOLDOWN_WAIT / 1000}s before the next --`);
         await sleep(COOLDOWN_WAIT);
         restFirst = false;
+      } else if (visitedOne) {
+        await sleep(JOB_PAUSE);
       }
+      visitedOne = true;
 
       await bringToFront(tab);
       const url = await goToApplicants(tab.id, job.href);
@@ -263,16 +275,34 @@ async function run(tab, fullRescan) {
       // where the next one starts; walking by address beats clicking Next, which
       // isn't always there — and when it wasn't, a 612-applicant job quietly
       // ended at 25.
+      // Where the next batch starts, or null when that was the last one. A page
+      // shorter than a full 25 is the end of the list whatever any total says,
+      // and so is reaching the total itself. The short page is the rule that
+      // matters: Recruiter's total is not to be relied on — one job showed 388
+      // against 165 applicants, another 27 against 106 — so it only ever saves
+      // asking for a batch we'd find empty anyway.
+      const nextStart = (page, at) => {
+        if (!page || page.stoppedEarly || !page.slots || page.slots < PAGE_SIZE) return null;
+        if (page.shown != null && at + page.slots >= page.shown) return null;
+        return at + page.slots;
+      };
+
+      // Everything the list said it held has already been read, so a batch that
+      // never came was one past the end — nothing to wait for, and nothing wrong.
+      const readEverythingShown = (r) => r.shown != null && r.read >= r.shown;
+
       const readWholeList = async () => {
         const res = await inject(tab.id, scrapeResumes,
           [skipKeys, KNOWN_STREAK_STOP, vouchedClean, job.applicants]);
         if (!res) return null;
         runLog.push(...(res.trace || []));
 
+        let at = 0;
+        let next = nextStart(res, at);
         let stalls = 0;
-        for (let hop = 0; hop < 80 && res.resumeFrom; hop++) {
+        for (let hop = 0; hop < 80 && next !== null; hop++) {
+          at = next;
           const base = url.split("?")[0];
-          const at = res.resumeFrom;
           await navigate(tab.id, `${base}?start=${at}`);
           const more = await inject(tab.id, scrapeResumes,
             [skipKeys.concat(res.urls.map(u => u.key)), KNOWN_STREAK_STOP, vouchedClean,
@@ -287,7 +317,8 @@ async function run(tab, fullRescan) {
           // pages of work. Same address on purpose: the page is still watching
           // for these exact people to be replaced, and sending it via the top
           // of the list would satisfy that watch with the wrong 25.
-          if (more.reason === "the next page never loaded" && stalls < PAGE_STALL_RETRIES) {
+          if (more.reason === "the next page never loaded" && stalls < PAGE_STALL_RETRIES &&
+              !readEverythingShown(res)) {
             stalls++;
             runLog.push(...(more.trace || []));
             runLog.push(`-- resting ${PAGE_STALL_WAIT * stalls / 1000}s and asking for ` +
@@ -304,12 +335,11 @@ async function run(tab, fullRescan) {
           res.read += more.read;
           res.stoppedEarly = more.stoppedEarly;
           res.expected = more.expected ?? res.expected;
+          res.shown = more.shown ?? res.shown;
+          res.blanks = (res.blanks || 0) + (more.blanks || 0);
           res.reason = more.reason;
-          res.resumeFrom = more.resumeFrom;
           res.firstId = more.firstId || res.firstId;
-          res.cappedByLinkedIn = more.cappedByLinkedIn;
-          res.incomplete = (more.stoppedEarly || more.cappedByLinkedIn) ? false
-            : (res.expected !== null && res.expected !== undefined ? res.read < res.expected : more.incomplete);
+          next = nextStart(more, at);
         }
         return res;
       };
@@ -320,9 +350,10 @@ async function run(tab, fullRescan) {
       // rows in it at all — after a long run of page loads has annoyed it. It
       // looks identical to a job with nobody in it, so the run says nothing and
       // a 446-applicant job reads zero in silence. Open it once more first.
-      if (res && res.read === 0 && job.applicants > 0) {
-        runLog.push(`-- no rows at all; resting ${COOLDOWN_WAIT / 1000}s and opening the list again --`);
-        await sleep(COOLDOWN_WAIT);      // straight back in was tried, and got the same nothing
+      for (let look = 1; look <= 2 && res && res.read === 0 && job.applicants > 0; look++) {
+        const rest = COOLDOWN_WAIT * look;     // straight back in was tried, and got the same nothing
+        runLog.push(`-- no rows at all; resting ${rest / 1000}s and opening the list again (try ${look} of 2) --`);
+        await sleep(rest);
         await bringToFront(tab);
         await navigate(tab.id, url);
         res = (await readWholeList()) || res;
@@ -334,22 +365,30 @@ async function run(tab, fullRescan) {
         continue;
       }
 
-      // LinkedIn stops serving a list somewhere past its 400th person: the page
-      // we ask for never arrives and the one before it stays on screen. That is
-      // its own limit, not a short read here — and calling it one made every
-      // future run re-walk the same seventeen pages, while telling the recruiter
-      // something had gone wrong when nothing had. Only the caller can see this:
-      // it holds the running total, and a single page of 25 never reaches 400.
+      // A batch asked for past the end of what the list said it held never
+      // arrives, because there was nothing there to send. That is the end of the
+      // list, not a failure — and treating it as one is what reported a job that
+      // read all 388 of its applicants, and took 77 CVs off them, as broken.
+      if (res.reason === "the next page never loaded" && readEverythingShown(res)) res.reason = "";
+
+      // Nobody read at all, on a job that has applicants, is a failure whatever
+      // the page thought — say so instead of passing it over in silence.
+      if (res.read === 0 && job.applicants > 0) res.reason = res.reason || "the list never appeared";
+
+      // The verdict, in one place: the page reports what it saw, this decides
+      // what it meant. Stopping early is on purpose; anything else that ends
+      // short of the list's own total left applicants unread.
+      const shortOfTotal = res.expected != null && res.read < res.expected;
+      res.incomplete = !res.stoppedEarly && (!!res.reason || shortOfTotal);
+      if (res.incomplete && !res.reason) res.reason = res.blanks ? "rows never appeared" : "the list ended early";
+
+      // Except past its 400th person, where LinkedIn simply stops serving a
+      // list — its own limit, not a short read here. Calling it one made every
+      // future run re-walk the same seventeen pages while telling the recruiter
+      // something had gone wrong when nothing had.
       if (res.incomplete && res.read >= PAGE_CAP && res.expected > res.read) {
         res.cappedByLinkedIn = true;
         res.incomplete = false;
-      }
-
-      // Nobody read at all, on a job that has applicants, is a failure whatever
-      // the page thought — say so instead of banking it as a quiet success.
-      if (res.read === 0 && job.applicants > 0) {
-        res.incomplete = true;
-        res.reason = res.reason || "the list never appeared";
       }
 
       // Two ways to come up empty: we opened the viewer and got nothing, or the
@@ -1228,8 +1267,11 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     if (!swapped) {
       window.open = origOpen;
       return { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-               expected: null, read: 0, incomplete: true, reason: "the next page never loaded",
-               resumeFrom: null, firstId: avoidFirstId,
+               expected: null, read: 0, reason: "the next page never loaded",
+               // The stale page still shows the list's own total, and the caller
+               // needs it: a batch that never came, asked for past the end of
+               // what the list said it held, is just the end of the list.
+               slots: 0, shown: totalResults(), blanks: 0, firstId: avoidFirstId,
                trace: [`start=${pageStart()}: still showing the previous page after 30s`] };
     }
   }
@@ -1237,8 +1279,9 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   if (!rowsPresent()) {
     window.open = origOpen;
     return { urls: [], skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false,
-             expected: null, read: 0, incomplete: false, reason: "the list never appeared",
-             resumeFrom: null, firstId: null, trace: ["no applicant rows on the page"] };
+             expected: null, read: 0, reason: "the list never appeared",
+             slots: 0, shown: null, blanks: 0, firstId: null,
+             trace: ["no applicant rows on the page"] };
   }
 
   // Re-sort before reading anyone, so the order we walk is the order we trust.
@@ -1263,7 +1306,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const failedItems = [];
   const seen = new Set();
   let skipped = 0, anon = 0, knownStreak = 0, stoppedEarly = false;
-  let resumeFrom = null;
+  let slotsOnPage = 0;
   let blanks = 0;
   // A page-by-page record of what was on screen, saved to Drive by the caller.
   // Blind guessing at why a read came up short has cost more than this costs.
@@ -1389,19 +1432,13 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
       `shows="${(document.querySelector("[data-test-profile-list-num-results]") || {}).textContent || "?"}" ` +
       `${Math.round((Date.now() - pageT0) / 1000)}s`);
 
-    // Where the caller should go next: the offset after this page, unless the
-    // list says we've reached its end or we've caught up with people we
-    // already have.
-    const here = Number(pageStart());
-    const shownNow = totalResults();
-    const sane = shownNow !== null && (!applicantsHint || shownNow <= applicantsHint);
-    const more = pageSlots.length > 0 && (!sane || here + pageSlots.length < shownNow);
-    resumeFrom = (!stoppedEarly && more) ? here + pageSlots.length : null;
-    // Say which of the two it was. "End of list" on a page that actually
-    // stopped early sent a diagnosis down the wrong road once already.
-    if (!resumeFrom) trace.push(stoppedEarly
-      ? `page ${page}: stopped early — ${knownStreakStop} in a row already downloaded`
-      : `page ${page}: end of list (start=${here}, slots=${pageSlots.length})`);
+    // Where to go next is the caller's to decide — it's the one that knows what
+    // has been read so far and what the job is supposed to hold. This page only
+    // reports what it saw. Deciding it here, from one page's view of the world,
+    // is what sent a finished 388-applicant job back round for a page that
+    // didn't exist, three times, and then called the whole job a failure.
+    slotsOnPage = pageSlots.length;
+    if (stoppedEarly) trace.push(`page ${page}: stopped early — ${knownStreakStop} in a row already downloaded`);
   }
 
   noteRows();
@@ -1426,14 +1463,6 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   const shown = totalResults();
   const expected = (shown !== null && (!applicantsHint || shown <= applicantsHint)) ? shown : null;
   const read = rowsSeen.size;
-  // Whether the list runs past what LinkedIn will page through is the caller's
-  // to judge, not this page's: it keeps the running total across pages, and one
-  // page of 25 can never reach the limit on its own. Deciding it here looked
-  // right and was always false.
-  const cappedByLinkedIn = false;
-  const incomplete = !stoppedEarly && (expected !== null && read < expected) && !resumeFrom;
-  const reason = incomplete ? (blanks ? "rows never appeared" : "the list ended early") : "";
-  if (incomplete) console.log(`Read ${read} of ${expected ?? "?"} applicants — ${reason}.`);
-  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, incomplete, reason,
-           resumeFrom, cappedByLinkedIn, firstId: firstRowId(), trace };
+  return { urls, skipped, failedItems, noCvItems, stoppedEarly, expected, read, reason: "",
+           slots: slotsOnPage, shown, blanks, firstId: firstRowId(), trace };
 }
