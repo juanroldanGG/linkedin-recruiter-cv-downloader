@@ -62,9 +62,14 @@ const STATE_FILE = "_cv-downloader-state-linkedin.json";
 // The worklist of people who have no downloadable resume, for recruiters.
 const NO_RESUME_FILE = "_no-resume-candidates-linkedin.csv";
 
-// Last run's page-by-page record. Overwritten every run; only ever read when a
-// run comes up short and somebody has to work out why.
+// Every run's page-by-page record, newest on top, the last RUN_LOG_KEEP of them.
+// Read when a run comes up short, or when someone asks how far yesterday's got —
+// which, when only the latest was kept, nobody could answer.
+// ponytail: read-then-write, so two people finishing within the same second can
+// lose one run's entry. It's a diagnostic log; the ledger is what can't lose data.
 const RUN_LOG_FILE = "_cv-downloader-last-run-linkedin.log";
+const RUN_LOG_KEEP = 30;
+const RUN_LOG_SEPARATOR = "\n\n" + "=".repeat(72) + "\n\n";
 
 // Misses before someone is retired. Two, not one, so a slow-loading page can
 // never strand a real candidate.
@@ -507,8 +512,10 @@ async function run(tab, fullRescan) {
     }
 
     await writeNoResumeList(state);
+    const thisRun = `${appName()} — run finished ${new Date().toISOString()}\n\n${runLog.join("\n")}\n`;
+    const earlierRuns = (await readTextFile(RUN_LOG_FILE)).split(RUN_LOG_SEPARATOR);
     await upsertFile(RUN_LOG_FILE, "text/plain",
-      `${appName()} — run finished ${new Date().toISOString()}\n\n${runLog.join("\n")}\n`);
+      [thisRun, ...earlierRuns].filter(r => r.trim()).slice(0, RUN_LOG_KEEP).join(RUN_LOG_SEPARATOR));
     await navigate(tab.id, startUrl);
     console.log("Run detail:\n" + detail.join("\n"));
 
@@ -659,6 +666,16 @@ async function readJsonFile(name) {
     console.error(`${name} is not valid JSON — treating it as empty.`);
     return null;
   }
+}
+
+// Plain-text contents, or "" if the file is missing or unreadable.
+async function readTextFile(name) {
+  const id = await findFileId(name);
+  if (!id) return "";
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${id}?alt=media&${DRIVE_ARGS}`
+  );
+  return res && res.ok ? await res.text() : "";
 }
 
 // Creates the file on first write, overwrites it after that.

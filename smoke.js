@@ -155,7 +155,9 @@ global.fetch = async (url, opts = {}) => {
 
   if (url.includes("alt=media")) {
     const id = (url.match(/\/files\/([^?]+)/) || [])[1];
-    return ok(JSON.parse(state.driveFiles[state.idToName[id]] || "{}"));
+    const raw = state.driveFiles[state.idToName[id]] || "";
+    // Parsed only when asked: the run log is plain text and would throw here.
+    return { ok: true, status: 200, json: async () => JSON.parse(raw || "{}"), text: async () => raw };
   }
 
   if (url.includes("/drive/v3/files?q=")) {
@@ -665,6 +667,24 @@ const withMiss = () => ({
   assert.ok(/=== .* \(job \d+/.test(log), "with a section per job: " + log);
   assert.ok(log.includes("result: read"), "and each job's result line: " + log);
   console.log("ok    every run writes a page-by-page log to Drive");
+
+  // ---- the log keeps a history, newest on top, capped --------------------
+  // When it held only the latest run, "how far did last night's get?" had no
+  // answer by morning. It keeps the last 30 now, and must never grow past that.
+  const LOG = "_cv-downloader-last-run-linkedin.log";
+  const SEP = "\n\n" + "=".repeat(72) + "\n\n";
+  state.driveFiles[LOG] = Array.from({ length: 30 }, (_, i) => `old run ${i + 1}\n`).join(SEP);
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [cleanPage(), cleanPage()];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+
+  const runs = state.driveFiles[LOG].split(SEP);
+  assert.ok(runs[0].includes("run finished"), "the newest run is on top:\n" + runs[0]);
+  assert.strictEqual((runs[1] || "").trim(), "old run 1", "the one before it comes next");
+  assert.strictEqual(runs.length, 30, "30 runs kept, got " + runs.length);
+  assert.ok(!runs.some(r => r.includes("old run 30")), "and the oldest drops off");
+  console.log("ok    the log keeps the last 30 runs, newest first");
 
   console.log("\nsmoke test passed — six runs end to end");
   process.exit(0);
