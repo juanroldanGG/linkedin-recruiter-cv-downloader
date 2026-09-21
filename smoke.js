@@ -538,9 +538,12 @@ const withMiss = () => ({
     "and it banks, so it isn't re-read from scratch next time");
   console.log("ok    a batch that never arrives is waited out and asked for again");
 
-  // ---- run 13b: still nothing after the rests, on a list past 400 ----------
-  // Only then is it LinkedIn's own limit. It must count as done, or every run
-  // from now on re-walks the same sixteen pages and cries failure each time.
+  // ---- run 13b: still nothing after the rests, deep into a long list -------
+  // This once counted as "LinkedIn's 400 limit" and the job was marked done —
+  // after which nothing past the stall was ever read again, because the next
+  // run stops early at the top. There is no such limit (a 770-applicant job
+  // read 740 of 740), so a stall that outlasts the rests is a short read like
+  // any other: said out loud, and never marked done.
   BUSY.applicants += 1; QUIET.applicants += 1;
   state.scrapeQueue = [
     { urls: [], skipped: 400, failedItems: [], noCvItems: [], stoppedEarly: false,
@@ -556,14 +559,14 @@ const withMiss = () => ({
   // one is asked for three times before the stall is believed.
   assert.strictEqual(state.navigated.filter(u => /\?start=25$/.test(u)).length, 3,
     "it gives the stall two more chances before believing it:\n" + state.navigated.join("\n"));
-  const capFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
-  assert.ok(capFinish.includes("first 400"), "the popup explains the limit:\n" + capFinish);
-  assert.ok(!capFinish.includes("Couldn't read every applicant"),
-    "and does not call it a failure:\n" + capFinish);
+  const deepFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
+  assert.ok(deepFinish.includes("Couldn't read every applicant"),
+    "a stall deep in the list is still a short read:\n" + deepFinish);
+  assert.ok(!deepFinish.includes("first 400"), "and no talk of a limit that doesn't exist:\n" + deepFinish);
   s = readState();
-  assert.strictEqual(s.jobCounts[QUIET.jobId], QUIET.applicants,
-    "the job is marked done, so the next run doesn't re-read the same 400");
-  console.log("ok    a list past LinkedIn's 400 limit is reported, not retried forever");
+  assert.strictEqual(s.jobCounts[QUIET.jobId], undefined,
+    "and the job is not marked done, or its unread tail is never visited again");
+  console.log("ok    a stall past the 400th applicant is a short read, never marked done");
 
   // ---- run 14: an empty shell of a list ------------------------------------
   // Recruiter hands back a page with no applicant rows on it. Reading nobody on

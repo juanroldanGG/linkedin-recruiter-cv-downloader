@@ -79,24 +79,13 @@ const NO_RESUME_STRIKES = 2;
 // in a row that we already have. Ignored on a relevance sort.
 const KNOWN_STREAK_STOP = 25;
 
-// LinkedIn stops serving a list a little past its 400th applicant. Verified on
-// a 612-applicant job: pages 1-17 arrive in a second each, and then start=425
-// never comes — the previous 25 people just stay on screen. Treated as "at
-// least this many read, and the list says there are more", not an exact wall,
-// so it still holds if LinkedIn moves it.
-//
-// The page-world scraper can't read this — it runs inside LinkedIn's page,
-// where none of this file's names exist — so it carries the number itself.
-// Referencing this constant there cost a whole run: every job died with
-// "page did not respond" and the popup cheerfully reported nothing to do.
-const PAGE_CAP = 400;
-
-// ...except the stall isn't always at 400. Two runs, two jobs: one stopped at
-// 425, the other at 375, and in both runs the job opened next read nobody at
-// all — twice in a row, including an immediate second look. So this is
-// Recruiter having had enough of being paged, not a fixed limit: it stops
-// answering for a while, and hands back empty lists to whatever asks next.
-// There's no cleverness for that, only waiting. Wait, then ask again.
+// Recruiter stops answering now and then while a long list is paged: the batch
+// asked for never arrives, and for a while afterwards it hands back empty lists
+// to whatever asks next. It passes. This once looked like a hard limit at 400
+// and was treated as one — jobs were marked done with their oldest applicants
+// unread. Then a 770-applicant job read 740 of 740 by waiting out two stalls,
+// at 325 and 725. There is no limit; there's only waiting, then asking again.
+// Anything a stall still leaves unread is a short read like any other.
 const PAGE_STALL_WAIT = 30000;
 const PAGE_STALL_RETRIES = 2;
 const COOLDOWN_WAIT = 60000;
@@ -233,7 +222,6 @@ async function run(tab, fullRescan) {
     let toDownloads = 0;
     let retiredThisRun = 0;
     const incompleteJobs = [];
-    const cappedJobs = [];
     const runLog = [`${jobs.length} of ${allJobs.length} jobs, full rescan: ${!!fullRescan}`];
 
     // Set when a job ends badly, because the next one then starts on a
@@ -387,15 +375,6 @@ async function run(tab, fullRescan) {
       res.incomplete = !res.stoppedEarly && (!!res.reason || shortOfTotal);
       if (res.incomplete && !res.reason) res.reason = res.blanks ? "rows never appeared" : "the list ended early";
 
-      // Except past its 400th person, where LinkedIn simply stops serving a
-      // list — its own limit, not a short read here. Calling it one made every
-      // future run re-walk the same seventeen pages while telling the recruiter
-      // something had gone wrong when nothing had.
-      if (res.incomplete && res.read >= PAGE_CAP && res.expected > res.read) {
-        res.cappedByLinkedIn = true;
-        res.incomplete = false;
-      }
-
       // Two ways to come up empty: we opened the viewer and got nothing, or the
       // row showed no Resume link. The list is not trustworthy on the second —
       // Recruiter drops the link from rows whose applicant did attach a CV — so
@@ -471,7 +450,6 @@ async function run(tab, fullRescan) {
       // also revokes any earlier certificate — otherwise a closed job, whose
       // count never moves again, would be skipped forever with people unread.
       const sawSomething = res.urls.length + res.skipped > 0;
-      if (res.cappedByLinkedIn) cappedJobs.push(`${label}: newest ${res.read} of ${res.expected ?? "?"}`);
 
       if (res.incomplete) {
         restFirst = true;
@@ -527,10 +505,6 @@ async function run(tab, fullRescan) {
       (incompleteJobs.length
         ? `\n\nCouldn't read every applicant:\n${capped(incompleteJobs, 4).join("\n")}\n\n` +
           `They'll be checked again next run. Keep this tab in front while it runs.`
-        : "") +
-      (cappedJobs.length
-        ? `\n\nLinkedIn only lets anyone page through the first 400 or so applicants, so these ` +
-          `were read newest-first and the older ones can't be reached:\n${capped(cappedJobs, 3).join("\n")}\n`
         : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
@@ -1304,10 +1278,10 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   // Re-sort before reading anyone, so the order we walk is the order we trust.
   // Only worth the two seconds when we're allowed to stop early anyway — on an
   // unvouched job we're reading the whole list regardless.
-  // LinkedIn won't page past the 400th applicant. On a longer list, sorting
-  // newest-first is what decides whether those reachable 400 are the ones that
-  // matter — so it's worth doing even when we can't stop early.
-  const overCap = (totalResults() || 0) > 400;   // PAGE_CAP — this runs in the page, not here
+  // Long lists are sorted newest-first too: new applicants arriving mid-walk
+  // then push people down a page (read twice, harmless) instead of landing
+  // anywhere in a relevance sort, where a shift can carry someone past us.
+  const overCap = (totalResults() || 0) > 400;
   const newestFirst = (vouchedClean || overCap) ? await chooseNewestFirst() : false;
   canStopEarly = vouchedClean && newestFirst;
   if (canStopEarly) {
