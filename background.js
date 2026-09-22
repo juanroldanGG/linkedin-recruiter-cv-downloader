@@ -28,8 +28,8 @@
 const CV_FOLDER_ID = "1RbBTJlBdS5TTRFgXic8XZImlu9tl9qHj";
 
 // LinkedIn job title -> Drive folder name, for the ones that don't match by
-// name. Comparison ignores case, spaces and punctuation, so "UI/UX Designer"
-// already matches "UI UX designer" without an entry here.
+// name. Comparison ignores case, spaces, punctuation and plurals, so "UI/UX
+// Designer" already matches "UI UX designers" without an entry here.
 // Verified against the live CV Folder on 2026-08-14. "Sales Account Manager"
 // and "Customer Success Manager" match their folders exactly, so they need no
 // entry here.
@@ -845,7 +845,12 @@ async function uploadToDrive(pdfUrl, filename, folderId) {
 
 // Job title -> Drive folder id. Exact-ish match first, then the alias table.
 function resolveFolder(jobTitle, folders) {
-  const key = s => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+  // Case, spaces, punctuation and a plural "s" on any word don't count. Roles
+  // are named by hand in two places: LinkedIn's "Web Operations Specialist"
+  // missed GroundControl's "Web Operation Specialist", and six CVs went to a
+  // Downloads folder instead of Drive.
+  const key = s => String(s || "").toLowerCase().split(/[^a-z0-9]+/)
+    .map(word => word.replace(/s$/, "")).join("");
   const byKey = new Map();
   for (const [name, id] of folders) byKey.set(key(name), id);
 

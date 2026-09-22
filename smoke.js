@@ -671,6 +671,29 @@ const withMiss = () => ({
   assert.ok(log.includes("result: read"), "and each job's result line: " + log);
   console.log("ok    every run writes a page-by-page log to Drive");
 
+  // ---- a job title that differs from its folder only by a plural ---------
+  // LinkedIn's "Web Operations Specialist" against GroundControl's "Web
+  // Operation Specialist": nothing matched, and six CVs went to a Downloads
+  // folder instead of Drive — marked done, so no later run would send them on.
+  const realTitle = QUIET.title;
+  QUIET.title = "Customer Success Managers";
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  const downloadsBefore = state.downloads.length, uploadsBeforePlural = state.pdfUploads;
+  state.scrapeQueue = [
+    { urls: [{ name: "Plural Person", url: "https://media.example/plural.pdf", key: KEY("plural") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 1, read: 1,
+      reason: "", slots: 1, shown: 1 },
+    cleanPage()
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+  QUIET.title = realTitle;
+
+  assert.strictEqual(state.downloads.length, downloadsBefore,
+    "nothing should land in Downloads: " + state.downloads.slice(downloadsBefore).join(", "));
+  assert.strictEqual(state.pdfUploads, uploadsBeforePlural + 1, "the CV reaches its Drive folder");
+  console.log("ok    a job title that differs from its folder by a plural still finds it");
+
   // ---- the log keeps a history, newest on top, capped --------------------
   // When it held only the latest run, "how far did last night's get?" had no
   // answer by morning. It keeps the last 30 now, and must never grow past that.
