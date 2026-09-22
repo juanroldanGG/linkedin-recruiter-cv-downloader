@@ -69,7 +69,12 @@ const chrome = {
     getPlatformInfo: cb => cb({}),
     getManifest: () => require("./manifest.json")
   },
-  storage: { local: { get: async () => ({ doneKeys: [] }), set: async () => {} } },
+  storage: {
+    local: {
+      get: async () => ({ doneKeys: [], laptopKeys: state.laptopKeys || [] }),
+      set: async o => { if (o.laptopKeys) state.laptopKeys = o.laptopKeys; }
+    }
+  },
   identity: {
     getAuthToken: (opts, cb) => cb("fake-token"),
     removeCachedAuthToken: (o, cb) => cb()
@@ -787,33 +792,47 @@ const withMiss = () => ({
   console.log("ok    a job title that differs from its folder by a plural still finds it");
 
   // ---- a job with no folder at all ---------------------------------------
-  // Skipped outright — not opened, nothing downloaded, nobody recorded — and
-  // picked up by the first run after its folder exists. Before, its CVs went
-  // to that laptop's Downloads and were marked done, where no run would ever
-  // find them again.
+  // Its CVs go to this computer's Downloads and the popup opens with a warning
+  // in capitals. What they no longer are is marked done: that stranded six CVs
+  // on a laptop where no later run would ever send them on. The first run
+  // after the folder exists uploads them; the runs before it don't download
+  // them again.
   QUIET.title = "Graphic Designer";
   BUSY.applicants += 1; QUIET.applicants += 1;
-  const downloadsBeforeNone = state.downloads.length;
-  state.scrapeQueue = [cleanPage()];              // BUSY's; QUIET must never ask
+  const laptopPage = () => ({
+    urls: [{ name: "Laptop Person", url: "https://media.example/laptop.pdf", key: KEY("laptop") }],
+    skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 1, read: 1,
+    reason: "", slots: 1, shown: 1 });
+  const downloadsBeforeNone = state.downloads.length, uploadsBeforeNone = state.pdfUploads;
+  state.scrapeQueue = [laptopPage(), cleanPage()];
   state.navigated = []; state.alerts = []; state.logs = [];
   await run();
 
-  assert.ok(!state.navigated.some(u => u.includes(QUIET.jobId)),
-    "a job with no folder is not even opened:\n" + state.navigated.join("\n"));
-  assert.strictEqual(state.downloads.length, downloadsBeforeNone, "and nothing lands in Downloads");
-  const noneFinish = state.alerts.find(a => a.startsWith("Done —")) || "";
-  assert.ok(noneFinish.includes("no Drive folder matches: Graphic Designer"),
-    "the popup names it:\n" + noneFinish);
-  assert.notStrictEqual(readState().jobCounts[QUIET.jobId], QUIET.applicants,
-    "and it isn't marked done");
+  assert.deepStrictEqual(state.downloads.slice(downloadsBeforeNone), ["Graphic Designer/Laptop Person.pdf"],
+    "its CV is saved to this computer");
+  assert.strictEqual(state.pdfUploads, uploadsBeforeNone, "not to Drive — there's no folder to put it in");
+  const noneFinish = state.alerts.find(a => a.includes("Done —")) || "";
+  assert.ok(noneFinish.startsWith("⚠️ NO DRIVE FOLDER FOR: GRAPHIC DESIGNER"),
+    "the popup opens with the warning, in capitals:\n" + noneFinish);
+  assert.ok(!(readLedger().keys || []).includes(KEY("laptop")), "the CV is not marked done");
+  assert.notStrictEqual(readState().jobCounts[QUIET.jobId], QUIET.applicants, "nor is the job");
 
-  QUIET.title = realTitle;                        // the folder "appears"
+  // Still no folder: what's already on this computer isn't fetched again.
   state.scrapeQueue = [cleanPage(), cleanPage()];
-  state.navigated = []; state.alerts = []; state.logs = [];
+  state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = [];
   await run();
-  assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
-    "once it has a folder, the next run picks it up");
-  console.log("ok    a job with no folder is skipped and picked up once the folder exists");
+  assert.ok(state.skipKeysSeen[0].includes(KEY("laptop")), "the laptop copy is skipped, not downloaded twice");
+
+  // The folder "appears": the same CV now goes to Drive, and only now counts as done.
+  QUIET.title = realTitle;
+  const uploadsBeforeFolder = state.pdfUploads;
+  state.scrapeQueue = [laptopPage(), cleanPage()];
+  state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = [];
+  await run();
+  assert.ok(!state.skipKeysSeen[0].includes(KEY("laptop")), "with a folder, the laptop copy is no longer skipped");
+  assert.strictEqual(state.pdfUploads, uploadsBeforeFolder + 1, "so it reaches Drive");
+  assert.ok(readLedger().keys.includes(KEY("laptop")), "and only then is it marked done");
+  console.log("ok    no folder: saved to this computer, warned first, sent to Drive once the folder exists");
 
   // ---- the log keeps a history, newest on top, capped --------------------
   // When it held only the latest run, "how far did last night's get?" had no

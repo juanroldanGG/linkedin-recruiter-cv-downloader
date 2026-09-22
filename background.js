@@ -160,8 +160,13 @@ async function run(tab, fullRescan) {
     // Shared record first; the local copy is a fallback for when Drive is
     // unreachable, and seeds the ledger with this machine's history on the
     // first run after an upgrade.
-    const { doneKeys = [] } = await chrome.storage.local.get("doneKeys");
+    const { doneKeys = [], laptopKeys = [] } = await chrome.storage.local.get(["doneKeys", "laptopKeys"]);
     const done = new Set([...(await readLedger()), ...doneKeys]);
+    // CVs this computer saved to its Downloads because their job had no Drive
+    // folder. Kept out of the shared ledger, so the first run after the folder
+    // exists uploads them to Drive; remembered here, so the runs before that
+    // don't download the same CVs again every time.
+    const onLaptop = new Set(laptopKeys);
     const state = await readState();
 
     const allJobs = onJobsList
@@ -234,15 +239,12 @@ async function run(tab, fullRescan) {
       const label = job.title || "Unknown job";
       const roleId = resolveFolder(label, folders);
       const folderId = roleId ? await getOrCreateChild(roleId, SOURCE_SUBFOLDER) : null;
-      // No folder it can be sure of: skip the job — don't read it, don't record
-      // anyone. Its CVs used to land in this computer's Downloads and be marked
-      // done: out of GroundControl's sight, and never sent on by a later run.
-      // Skipped, they're picked up by the first run after the folder exists.
-      if (!folderId) {
-        unmatched.push(label);
-        runLog.push(`\n=== ${label} (job ${job.jobId}) ===\nskipped — no Drive folder matches this title`);
-        continue;
-      }
+      // No folder it can be sure of: the job is still read, its CVs go to this
+      // computer's Downloads, and the popup opens with a warning in capitals.
+      // They used to be marked done as well — out of GroundControl's sight and
+      // never sent on by a later run. Now the run after the folder exists
+      // uploads them.
+      if (!folderId) unmatched.push(label);
 
       if (restFirst) {
         runLog.push(`\n-- last job came up short; resting ${COOLDOWN_WAIT / 1000}s before the next --`);
@@ -263,7 +265,10 @@ async function run(tab, fullRescan) {
       // Retired people are skipped inside the page, so they are never clicked
       // and never cost the ten seconds it takes to fail. A full rescan skips
       // nobody — that's the whole point.
-      const skipKeys = fullRescan ? [] : Array.from(done).concat(Object.keys(state.noResume));
+      // With no folder, whatever is already on this laptop is skipped too; with
+      // one, it isn't, which is what gets those CVs into Drive at last.
+      const skipKeys = (fullRescan ? [] : Array.from(done).concat(Object.keys(state.noResume)))
+        .concat(folderId ? [] : Array.from(onLaptop));
 
       // A banked count is this job's certificate that last time finished clean.
       // Without one, somebody further down the list may still be unfinished,
@@ -401,24 +406,26 @@ async function run(tab, fullRescan) {
       let uploaded = 0, saved = 0, uploadFailed = 0;
       for (const item of res.urls) {
         const filename = `${safeName(item.name) || "resume"}.pdf`;
-        const ok = await uploadToDrive(item.url, filename, folderId);
+        const ok = folderId ? await uploadToDrive(item.url, filename, folderId) : false;
         if (ok) {
           uploaded++;
         } else {
-          // Drive refused — keep a copy locally rather than lose it for now.
+          // No folder, or Drive refused: keep a copy on this computer for now.
           chrome.downloads.download({
             url: item.url,
             filename: `${safeName(label)}/${filename}`,
             saveAs: false
           });
           saved++;
-          // They stay unrecorded and are retried, so this job doesn't earn
-          // its clean certificate.
-          uploadFailed++;
+          if (folderId) uploadFailed++;              // Drive hiccup: retried next run
+          else if (item.key) onLaptop.add(item.key); // no folder: sent once there is one
         }
-        // Only remember it once it's in Drive. Recording a CV that only reached
-        // Downloads would strand it there forever.
-        if (item.key && ok) done.add(item.key);
+        // Only remember it as done once it's in Drive. Recording a CV that only
+        // reached Downloads would strand it there forever.
+        if (item.key && ok) {
+          done.add(item.key);
+          onLaptop.delete(item.key);
+        }
         await sleep(400);
       }
 
@@ -465,7 +472,7 @@ async function run(tab, fullRescan) {
           delete state.jobCounts[job.jobId];
           clearedCounts.add(job.jobId);
         }
-      } else if (sawSomething && emptyHanded.length === 0 && uploadFailed === 0 &&
+      } else if (sawSomething && emptyHanded.length === 0 && uploadFailed === 0 && folderId &&
           job.jobId && job.applicants > 0) {
         state.jobCounts[job.jobId] = job.applicants;
         clearedCounts.delete(job.jobId);
@@ -476,10 +483,11 @@ async function run(tab, fullRescan) {
       // also lets a colleague starting mid-run pick up what's already done.
       for (const k of await writeLedger(done)) done.add(k);
       await writeState(state);
-      await chrome.storage.local.set({ doneKeys: Array.from(done) });
+      await chrome.storage.local.set({ doneKeys: Array.from(done), laptopKeys: Array.from(onLaptop) });
 
       runLog.push(`result: read ${res.read} of ${res.expected ?? "?"}, uploaded ${uploaded}, ` +
         `skipped ${res.skipped}, no resume ${emptyHanded.length}` +
+        (folderId ? "" : ` — NO DRIVE FOLDER: ${saved} saved to this computer's Downloads`) +
         (res.incomplete ? ` — INCOMPLETE (${res.reason})` : ""));
       console.log(`[${label}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
       toDrive += uploaded;
@@ -504,7 +512,15 @@ async function run(tab, fullRescan) {
     console.log("Run detail:\n" + detail.join("\n"));
 
     const noResume = Object.keys(state.noResume).length;
-    const finish =
+    // First thing on screen, in capitals: the one outcome where CVs are not
+    // where GroundControl can see them.
+    const noFolderWarning = unmatched.length
+      ? `⚠️ NO DRIVE FOLDER FOR: ${capped(unmatched, 3).join(", ").toUpperCase()}\n` +
+        `ITS CVS WENT TO THIS COMPUTER'S DOWNLOADS FOLDER, NOT TO DRIVE, SO GROUNDCONTROL ` +
+        `CAN'T SEE THEM. MAKE SURE GROUNDCONTROL HAS THIS ROLE, NAMED AS IN LINKEDIN — ` +
+        `THE NEXT RUN THEN UPLOADS THEM TO DRIVE BY ITSELF.\n\n`
+      : "";
+    const finish = noFolderWarning +
       `Done — ${cvsPhrase(toDrive)} saved to Drive.` +
       (toDownloads ? `\n${toDownloads} went to the Downloads folder instead.` : "") +
       (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
@@ -513,10 +529,6 @@ async function run(tab, fullRescan) {
           `They'll be checked again next run. Keep this tab in front while it runs.`
         : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
-      (unmatched.length
-        ? `\n\nSkipped — no Drive folder matches: ${capped(unmatched, 3).join(", ")}. ` +
-          `They'll be downloaded on the first run after GroundControl has a role by that name.`
-        : "") +
       (retiredThisRun ? `\n\n${peoplePhrase(retiredThisRun)} never had a resume and won't be opened again.` : "") +
       (noResume ? `\n\n${peoplePhrase(noResume)} have no resume — see ${NO_RESUME_FILE} in the CV folder.` : "");
     await inject(tab.id, m => alert(m), [finish]);
