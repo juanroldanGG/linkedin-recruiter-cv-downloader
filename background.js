@@ -234,7 +234,15 @@ async function run(tab, fullRescan) {
       const label = job.title || "Unknown job";
       const roleId = resolveFolder(label, folders);
       const folderId = roleId ? await getOrCreateChild(roleId, SOURCE_SUBFOLDER) : null;
-      if (!folderId) unmatched.push(label);
+      // No folder it can be sure of: skip the job — don't read it, don't record
+      // anyone. Its CVs used to land in this computer's Downloads and be marked
+      // done: out of GroundControl's sight, and never sent on by a later run.
+      // Skipped, they're picked up by the first run after the folder exists.
+      if (!folderId) {
+        unmatched.push(label);
+        runLog.push(`\n=== ${label} (job ${job.jobId}) ===\nskipped — no Drive folder matches this title`);
+        continue;
+      }
 
       if (restFirst) {
         runLog.push(`\n-- last job came up short; resting ${COOLDOWN_WAIT / 1000}s before the next --`);
@@ -393,26 +401,24 @@ async function run(tab, fullRescan) {
       let uploaded = 0, saved = 0, uploadFailed = 0;
       for (const item of res.urls) {
         const filename = `${safeName(item.name) || "resume"}.pdf`;
-        const ok = folderId && await uploadToDrive(item.url, filename, folderId);
+        const ok = await uploadToDrive(item.url, filename, folderId);
         if (ok) {
           uploaded++;
         } else {
-          // Drive unavailable or no matching folder — keep the file locally
-          // rather than losing it.
+          // Drive refused — keep a copy locally rather than lose it for now.
           chrome.downloads.download({
             url: item.url,
             filename: `${safeName(label)}/${filename}`,
             saveAs: false
           });
           saved++;
-          // A folder existed and Drive still refused. They stay unrecorded and
-          // must be retried, so this job doesn't earn its clean certificate.
-          if (folderId) uploadFailed++;
+          // They stay unrecorded and are retried, so this job doesn't earn
+          // its clean certificate.
+          uploadFailed++;
         }
-        // Only remember it when it reached its final home. A Drive upload that
-        // failed while a folder existed is a hiccup worth retrying next run;
-        // recording it would strand the CV in Downloads forever.
-        if (item.key && (ok || !folderId)) done.add(item.key);
+        // Only remember it once it's in Drive. Recording a CV that only reached
+        // Downloads would strand it there forever.
+        if (item.key && ok) done.add(item.key);
         await sleep(400);
       }
 
@@ -508,8 +514,8 @@ async function run(tab, fullRescan) {
         : "") +
       (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
       (unmatched.length
-        ? `\n\nNo Drive folder for ${jobsPhrase(unmatched.length)} — those went to Downloads. ` +
-          `Add ${capped(unmatched, 3).join(", ")} to ALIASES in background.js.`
+        ? `\n\nSkipped — no Drive folder matches: ${capped(unmatched, 3).join(", ")}. ` +
+          `They'll be downloaded on the first run after GroundControl has a role by that name.`
         : "") +
       (retiredThisRun ? `\n\n${peoplePhrase(retiredThisRun)} never had a resume and won't be opened again.` : "") +
       (noResume ? `\n\n${peoplePhrase(noResume)} have no resume — see ${NO_RESUME_FILE} in the CV folder.` : "");
@@ -843,19 +849,54 @@ async function uploadToDrive(pdfUrl, filename, folderId) {
   }
 }
 
-// Job title -> Drive folder id. Exact-ish match first, then the alias table.
+// Job title -> Drive folder id, or null when no folder is certainly the one.
+//
+// Roles are named by hand twice, once in LinkedIn and once in GroundControl,
+// and the names drift: "Web Operations Specialist" against "Web Operation
+// Specialist" sent six CVs to a Downloads folder, and "Sales Develpment
+// Representative." sits in Drive today waiting to do the same. So, in order:
+//   1. the same words, ignoring case, accents, punctuation, plurals, the
+//      usual short forms (Sr, Ops, HR, SDR, and LATAM's RH and TI), words
+//      repeated in brackets — "Sales Development Representative (SDR)" — and
+//      "Remote"/"LATAM", which never tell two of these roles apart;
+//   2. the alias table, for true synonyms no rule can guess;
+//   3. the same words in any order, allowing one slipped letter in a long word.
+// Never "most of the words": Web Operations and Sales Operations Specialist
+// share two of three, and CVs in the wrong role are worse than CVs in none.
+// When two folders fit equally, it's none — the job is skipped and says so.
+// Every rule here was attacked with titles built to land in the wrong folder;
+// the ones that did are in smoke.js and must stay "none".
 function resolveFolder(jobTitle, folders) {
-  // Case, spaces, punctuation and a plural "s" on any word don't count. Roles
-  // are named by hand in two places: LinkedIn's "Web Operations Specialist"
-  // missed GroundControl's "Web Operation Specialist", and six CVs went to a
-  // Downloads folder instead of Drive.
-  const key = s => String(s || "").toLowerCase().split(/[^a-z0-9]+/)
-    .map(word => word.replace(/s$/, "")).join("");
-  const byKey = new Map();
-  for (const [name, id] of folders) byKey.set(key(name), id);
+  // Whole words only, so DevOps and Sales stay themselves.
+  const SHORT = {
+    sr: "senior", jr: "junior", mgr: "manager", admin: "administrator", rep: "representative",
+    ops: "operations", hr: "human resources", rh: "human resources",
+    it: "information technology", ti: "information technology",
+    sdr: "sales development representative", csm: "customer success manager",
+    sdet: "software development engineer in test",
+    costumer: "customer"   // how Spanish speakers most often spell it
+  };
+  const NOISE = new Set(["remote", "latam", "hybrid", "onsite"]);
+  const split = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .toLowerCase().split(/[^a-z0-9]+/)
+    // A plural s comes off words of four letters or more. Below that it's part
+    // of an acronym and stays: HRS is a client, not two HRs.
+    .map(w => w.length >= 4 ? w.replace(/s$/, "") : w)
+    // Lone letters are "(s)" or a level "I"; numbers stay — Tier 2 is its own role.
+    .filter(w => (w.length > 1 || /\d/.test(w)) && !NOISE.has(w));
+  const words = s => [...new Set(split(s).flatMap(w => SHORT[w] ? split(SHORT[w]) : [w]))];
+  const key = s => words(s).join("");
+
+  // Old "CVs ..." folders predate GroundControl and are never where new CVs go.
+  // Named outright: relying on the "cvs" word to keep them out failed the day
+  // a title named a client called CVS.
+  const current = [...folders].filter(([name]) => !/^\s*cvs\b/i.test(name));   // a Map in the extension
+
+  const byKey = new Map();   // key -> id, or null when two folders share the key
+  for (const [name, id] of current) byKey.set(key(name), byKey.has(key(name)) ? null : id);
 
   const direct = byKey.get(key(jobTitle));
-  if (direct) return direct;
+  if (direct !== undefined) return direct;
 
   for (const [job, folderName] of Object.entries(ALIASES)) {
     if (key(job) === key(jobTitle)) {
@@ -864,7 +905,38 @@ function resolveFolder(jobTitle, folders) {
       console.warn(`Alias "${jobTitle}" -> "${folderName}" but no such Drive folder.`);
     }
   }
-  return null;
+
+  // One letter changed, missing, extra or swapped — only in words of five
+  // letters or more, where one letter can't turn a word into a different one,
+  // and never the last letter, where it can: managed/manager, designed/designer.
+  const oneSlip = (a, b) => {
+    if (a === b) return true;
+    if (Math.min(a.length, b.length) < 5 || Math.abs(a.length - b.length) > 1) return false;
+    let i = 0;
+    while (a[i] === b[i]) i++;
+    const shorter = Math.min(a.length, b.length);
+    if (a.length === b.length ? i === shorter - 1 : i === shorter) return false;
+    if (a.length > b.length) return a.slice(i + 1) === b.slice(i);
+    if (a.length < b.length) return a.slice(i) === b.slice(i + 1);
+    return a.slice(i + 1) === b.slice(i + 1) ||
+      (a[i] === b[i + 1] && a[i + 1] === b[i] && a.slice(i + 2) === b.slice(i + 2));
+  };
+  // Every word has a partner on the other side, and there's nothing left over.
+  const sameWords = (a, b) => {
+    if (a.length !== b.length) return false;
+    const unpaired = [...b];
+    for (const w of a) {
+      const i = unpaired.findIndex(v => oneSlip(w, v));
+      if (i < 0) return false;
+      unpaired.splice(i, 1);
+    }
+    return true;
+  };
+
+  const title = words(jobTitle);
+  const fits = current.filter(([name]) => sameWords(title, words(name)));
+  if (fits.length > 1) console.warn(`"${jobTitle}" fits ${fits.map(f => `"${f[0]}"`).join(" and ")} — not guessing.`);
+  return fits.length === 1 ? fits[0][1] : null;
 }
 
 // --- helpers (service worker side) -----------------------------------------
