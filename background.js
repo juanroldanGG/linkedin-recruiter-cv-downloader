@@ -515,10 +515,7 @@ async function run(tab, fullRescan) {
     // First thing on screen, in capitals: the one outcome where CVs are not
     // where GroundControl can see them.
     const noFolderWarning = unmatched.length
-      ? `⚠️ NO DRIVE FOLDER FOR: ${capped(unmatched, 3).join(", ").toUpperCase()}\n` +
-        `ITS CVS WENT TO THIS COMPUTER'S DOWNLOADS FOLDER, NOT TO DRIVE, SO GROUNDCONTROL ` +
-        `CAN'T SEE THEM. MAKE SURE GROUNDCONTROL HAS THIS ROLE, NAMED AS IN LINKEDIN — ` +
-        `THE NEXT RUN THEN UPLOADS THEM TO DRIVE BY ITSELF.\n\n`
+      ? `⚠️ NO DRIVE FOLDER FOR ${capped(unmatched, 3).join(", ").toUpperCase()} — CVS SAVED TO DOWNLOADS\n\n`
       : "";
     const finish = noFolderWarning +
       `Done — ${cvsPhrase(toDrive)} saved to Drive.` +

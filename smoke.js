@@ -812,7 +812,7 @@ const withMiss = () => ({
     "its CV is saved to this computer");
   assert.strictEqual(state.pdfUploads, uploadsBeforeNone, "not to Drive — there's no folder to put it in");
   const noneFinish = state.alerts.find(a => a.includes("Done —")) || "";
-  assert.ok(noneFinish.startsWith("⚠️ NO DRIVE FOLDER FOR: GRAPHIC DESIGNER"),
+  assert.ok(noneFinish.startsWith("⚠️ NO DRIVE FOLDER FOR GRAPHIC DESIGNER — CVS SAVED TO DOWNLOADS"),
     "the popup opens with the warning, in capitals:\n" + noneFinish);
   assert.ok(!(readLedger().keys || []).includes(KEY("laptop")), "the CV is not marked done");
   assert.notStrictEqual(readState().jobCounts[QUIET.jobId], QUIET.applicants, "nor is the job");
