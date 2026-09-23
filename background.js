@@ -525,9 +525,8 @@ async function run(tab, fullRescan) {
         ? `\n\nCouldn't read every applicant:\n${capped(incompleteJobs, 4).join("\n")}\n\n` +
           `They'll be checked again next run. Keep this tab in front while it runs.`
         : "") +
-      (skippedJobs.length ? `\n\n${jobsPhrase(skippedJobs.length)} had no new applicants.` : "") +
-      (retiredThisRun ? `\n\n${peoplePhrase(retiredThisRun)} never had a resume and won't be opened again.` : "") +
-      (noResume ? `\n\n${peoplePhrase(noResume)} have no resume — see ${NO_RESUME_FILE} in the CV folder.` : "");
+      (skippedJobs.length ? `\n\nNo new applicants: ${capped(skippedJobs, 4).join(", ")}.` : "") +
+      (noResume ? `\n\n${noResumeLine(state.noResume, retiredThisRun, NO_RESUME_FILE)}` : "");
     await inject(tab.id, m => alert(m), [finish]);
   } catch (err) {
     console.error("Run failed:", err);
@@ -561,7 +560,20 @@ const appName = () => {
 
 const jobsPhrase = n => `${n} job${n === 1 ? "" : "s"}`;
 const cvsPhrase = n => `${n} new CV${n === 1 ? "" : "s"}`;
-const peoplePhrase = n => `${n} ${n === 1 ? "person" : "people"}`;
+// The no-resume list is everyone ever retired, not this run's — a bare "21
+// people have no resume" under a 20-CV run read as half the run coming up
+// empty. So: the total, since when, and how many this run added. Counted per
+// application, like the list itself: one person on three jobs is three rows.
+const noResumeLine = (noResume, newThisRun, file) => {
+  const entries = Object.values(noResume);
+  const first = entries.map(e => e.at).filter(Boolean).sort()[0];
+  const since = first
+    ? ` since ${new Date(first).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
+    : "";
+  const n = entries.length;
+  return `No resume: ${n} applicant${n === 1 ? "" : "s"} in total${since}, ` +
+    `${newThisRun ? `${newThisRun} new` : "none new"} in this run — see ${file} in the CV folder.`;
+};
 
 // --- Google Drive -----------------------------------------------------------
 

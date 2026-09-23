@@ -350,8 +350,8 @@ const withMiss = () => ({
     "a job whose applicant count has not moved must never be opened");
   assert.ok(state.navigated.some(u => u.includes(BUSY.jobId)),
     "the job that gained applicants must be opened");
-  assert.ok(finish.includes("1 job had no new applicants"),
-    "the popup should say what it skipped:\n" + finish);
+  assert.ok(finish.includes(`No new applicants: ${QUIET.title}.`),
+    "the popup should name the job it skipped:\n" + finish);
   console.log("ok    a job with an unchanged applicant count is skipped entirely");
 
   assert.strictEqual(state.pdfUploads, 1, "the one new CV should have reached Drive");
@@ -380,6 +380,13 @@ const withMiss = () => ({
   assert.strictEqual(s.misses[KEY("none1")], undefined, "the strike is cleared on retirement");
   console.log("ok    a second miss retires them and clears the strike");
 
+  // The popup's count is the whole list, not this run's — and says so, since
+  // "21 people have no resume" under a 20-CV run read as half the run failing.
+  const retireFinish = state.alerts.find(a => a.includes("Done —")) || "";
+  assert.ok(/No resume: 1 applicant in total since [A-Z][a-z]{2} \d{1,2}, 1 new in this run/.test(retireFinish),
+    "the no-resume line gives the total, since when, and how many are new:\n" + retireFinish);
+  console.log("ok    the no-resume count says it's a running total, and how many this run added");
+
   const csv = state.driveFiles["_no-resume-candidates-linkedin.csv"];
   assert.ok(csv !== undefined, "the no-resume worklist should be written to Drive");
   assert.ok(csv.startsWith("﻿"), "needs a BOM so Excel renders accented names");
@@ -396,6 +403,10 @@ const withMiss = () => ({
     "the retired person must be handed to the page as skip-me, so they are never clicked again");
   assert.ok(skipped.includes(KEY("new1")), "already-downloaded people are skipped too");
   console.log("ok    retired and downloaded people are never clicked again");
+  assert.ok((state.alerts.find(a => a.includes("Done —")) || "").includes("1 applicant in total since"),
+    "the next run still shows the total");
+  assert.ok((state.alerts.find(a => a.includes("Done —")) || "").includes("none new in this run"),
+    "but says nobody new was added");
 
   assert.strictEqual(state.vouchedSeen[0], false,
     "a job that has never finished clean must not be allowed to stop early");

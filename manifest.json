@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LinkedIn Recruiter CV Downloader",
-  "version": "5.23",
+  "version": "5.24",
   "description": "Downloads Recruiter resumes into Google Drive. Skips jobs with no new applicants and stops re-trying people who have no resume.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp/z/QybtkDFCi76R/+vDr21jnnGJyOuwc2wzWF0/h2EHWAaNq/aEDDHtDA4ijINqsPCsqSyLCCHZDOHt5TbhpbruoJbD2GXMkzBeXu3EMgcPaIxoUsSrXS77iwICvpVg+JfKnNhW+Hvef0Dri+pTXvXQwkW3g4w3siHHPAyeEd0wpqHw4sR1pBsrPKE9ikq6s9EXBqKA+f6DDF1hOd8mJOvIH+Fgl18S0wlpj20TTrsiojd74oGgD+pIxFgaqVVFvpLLFwKPePguROUVxAerf1XQKavpjrr6YWGlzY3lXQhe1/s0dtqymaqRPyrW4nxW5asexaNFc0c9gy9219fVQQIDAQAB",
   "action": {
