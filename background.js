@@ -119,6 +119,12 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 chrome.action.onClicked.addListener((tab) => run(tab, false));
 
+// One run at a time. A second click (or a full rescan picked from the menu)
+// while a run is going would start another run in the same tab, both steering
+// it between pages — and the first seconds of a run are silent, which is
+// exactly when a second click happens.
+let running = false;
+
 async function run(tab, fullRescan) {
   const onJobsList = tab.url.includes("/talent/jobs");
   const onApplicants = APPLICANTS_RE.test(tab.url);
@@ -131,6 +137,16 @@ async function run(tab, fullRescan) {
     ));
     return;
   }
+  if (running) {
+    inject(tab.id, showToast, ["LinkedIn CV Downloader is already running — leave this tab alone until the finish popup."]);
+    return;
+  }
+  running = true;
+
+  // Something on screen the moment the icon is clicked: before the start popup
+  // come a few quiet seconds of reading Drive, and a quiet few seconds read as
+  // "nothing happened".
+  inject(tab.id, showToast, ["LinkedIn CV Downloader is starting — a popup will appear in a few seconds. Keep this tab in front."]);
 
   // MV3 kills the service worker after ~30s idle; a 7-job run takes minutes.
   const keepAlive = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
@@ -197,6 +213,7 @@ async function run(tab, fullRescan) {
     // one, so the counts that only matter for diagnosis go to the console.
     console.log(`${jobs.length} of ${allJobs.length} jobs to visit, ${folders.size} Drive folders; ` +
       `${done.size} already downloaded, ${Object.keys(state.noResume).length} known to have no resume`);
+    await inject(tab.id, hideToast);   // the start popup replaces the "starting" note
     await inject(tab.id, m => alert(m), [
       fullRescan
         ? `${appName()} starting a FULL RESCAN.\n\n` +
@@ -533,8 +550,10 @@ async function run(tab, fullRescan) {
   } catch (err) {
     console.error("Run failed:", err);
   } finally {
+    running = false;
     clearInterval(keepAlive);
     chrome.power.releaseKeepAwake();
+    await inject(tab.id, hideToast);
   }
 }
 
@@ -1042,6 +1061,27 @@ async function goToApplicants(tabId, href) {
 }
 
 // --- page-world functions ---------------------------------------------------
+
+// A small "working" note pinned to the top of the page. Not an alert: an alert
+// would freeze the very page the run needs. Gone on its own when the tab moves
+// to another page, and replaced by the start popup. Same as the Indeed one.
+function showToast(msg) {
+  let el = document.getElementById("cvdl-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "cvdl-toast";
+    el.style.cssText = "position:fixed;top:16px;left:50%;transform:translateX(-50%);" +
+      "z-index:2147483647;background:#1f2937;color:#fff;padding:12px 18px;border-radius:8px;" +
+      "font:15px/1.4 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:90vw";
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+}
+
+function hideToast() {
+  const el = document.getElementById("cvdl-toast");
+  if (el) el.remove();
+}
 
 // On a profile's Attachments page, returns the resume's PDF URL, or null if the
 // applicant really attached nothing. The download button builds a link and

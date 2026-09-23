@@ -98,7 +98,12 @@ const chrome = {
   },
   scripting: {
     executeScript: async ({ func, args = [] }) => {
-      if (func.name === "scrapeJobList") return [{ result: [jobRow(QUIET), jobRow(BUSY)] }];
+      if (func.name === "scrapeJobList") {
+        state.jobListReads = (state.jobListReads || 0) + 1;
+        return [{ result: [jobRow(QUIET), jobRow(BUSY)] }];
+      }
+      if (func.name === "showToast") { (state.toasts = state.toasts || []).push(args[0]); return [{ result: true }]; }
+      if (func.name === "hideToast") return [{ result: true }];
       if (func.name === "getPageTitle") return [{ result: BUSY.title }];
       if (func.name === "findAttachmentPdf") {
         const id = (state.tabUrl.match(/\/profile\/([^/?]+)\/attachments/) || [])[1];
@@ -194,7 +199,8 @@ const SOURCE_SUB = "LinkedIn";
 {
   const backgroundOnly = (src.match(/^const ([A-Z][A-Z0-9_]+)\s*=/gm) || [])
     .map(line => line.replace(/^const /, "").replace(/\s*=$/, ""));
-  const injected = ["scrapeResumes", "findAttachmentPdf", "scrapeJobList", "getPageTitle"];
+  const injected = ["scrapeResumes", "findAttachmentPdf", "scrapeJobList", "getPageTitle",
+                    "showToast", "hideToast"];
 
   for (const name of injected) {
     const start = src.search(new RegExp(`^(async )?function ${name}\\(`, "m"));
@@ -889,6 +895,25 @@ const withMiss = () => ({
   assert.strictEqual(runs.length, 30, "30 runs kept, got " + runs.length);
   assert.ok(!runs.some(r => r.includes("old run 30")), "and the oldest drops off");
   console.log("ok    the log keeps the last 30 runs, newest first");
+
+  // ---- a second click while a run is going -------------------------------
+  // The first seconds of a run are silent, which is exactly when a second click
+  // happens — and two runs in one tab both steer it between pages. A click puts
+  // a note on the page at once; a second one only says a run is going.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [cleanPage(), cleanPage()];
+  state.toasts = []; state.jobListReads = 0;
+  state.navigated = []; state.alerts = []; state.logs = [];
+  state.tabUrl = "https://www.linkedin.com/talent/jobs";
+  const jobsTab = { id: 1, windowId: 1, url: "https://www.linkedin.com/talent/jobs" };
+  await Promise.all([state.clickHandler(jobsTab), state.clickHandler(jobsTab)]);
+  assert.ok((state.toasts[0] || "").includes("is starting"),
+    "the first click puts a note on the page at once: " + JSON.stringify(state.toasts));
+  assert.ok(state.toasts.some(t => t.includes("already running")), "the second click says a run is going");
+  assert.strictEqual(state.jobListReads, 1, "and only one run reads the job list");
+  await state.clickHandler(jobsTab);
+  assert.strictEqual(state.jobListReads, 2, "once that run has finished, a click starts one again");
+  console.log("ok    a click shows a note at once, and a second click can't start a second run");
 
   console.log("\nsmoke test passed — six runs end to end");
   process.exit(0);
