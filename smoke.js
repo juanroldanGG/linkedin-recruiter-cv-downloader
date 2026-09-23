@@ -45,7 +45,9 @@ const jobRow = j => ({
   title: j.title,
   href: `https://www.linkedin.com/talent/hire/${j.jobId}/discover/applicants`,
   jobId: j.jobId,
-  applicants: j.applicants
+  applicants: j.applicants,
+  poster: j.poster,
+  posted: j.posted
 });
 
 const KEY = id => `${BUSY.jobId}:${id}`;
@@ -801,6 +803,31 @@ const withMiss = () => ({
     "nothing should land in Downloads: " + state.downloads.slice(downloadsBefore).join(", "));
   assert.strictEqual(state.pdfUploads, uploadsBeforePlural + 1, "the CV reaches its Drive folder");
   console.log("ok    a job title that differs from its folder by a plural still finds it");
+
+  // ---- two open jobs with the same title ---------------------------------
+  // Four "Customer Success Manager" jobs were open at once, and the popup's
+  // "No new applicants: Customer Success Manager, Customer Success Manager, ..."
+  // said nothing about which. Where a title repeats, who posted it and when.
+  const realBusyTitle = BUSY.title;
+  Object.assign(QUIET, { poster: "Katya Aresti Tejada", posted: "9/21/2026" });
+  Object.assign(BUSY, { title: QUIET.title, poster: "Tanya Alfaro", posted: "9/16/2026" });
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [
+    cleanPage(),
+    { urls: [{ name: "Twin Person", url: "https://media.example/twin.pdf", key: KEY("twin") }],
+      skipped: 0, failedItems: [], noCvItems: [], stoppedEarly: false, expected: 1, read: 1,
+      reason: "", slots: 1, shown: 1 }
+  ];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+  const twinFinish = state.alerts.find(a => a.includes("Done —")) || "";
+  assert.ok(twinFinish.includes("Customer Success Manager (Tanya, Sep 16): 1"),
+    "a repeated title says whose and when:\n" + twinFinish);
+  assert.ok((state.driveFiles["_cv-downloader-last-run-linkedin.log"] || "")
+    .includes("=== Customer Success Manager (Katya, Sep 21) (job"), "and so does the run log");
+  BUSY.title = realBusyTitle;
+  delete QUIET.poster; delete QUIET.posted; delete BUSY.poster; delete BUSY.posted;
+  console.log("ok    jobs that share a title are told apart by who posted them and when");
 
   // ---- a job with no folder at all ---------------------------------------
   // Its CVs go to this computer's Downloads and the popup opens with a warning

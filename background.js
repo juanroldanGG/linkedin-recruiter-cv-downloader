@@ -190,7 +190,8 @@ async function run(tab, fullRescan) {
       j.jobId && j.applicants > 0 && state.jobCounts[j.jobId] === j.applicants;
 
     const jobs = fullRescan ? allJobs : allJobs.filter(j => !unchanged(j));
-    const skippedJobs = fullRescan ? [] : allJobs.filter(unchanged).map(j => j.title);
+    const nameOf = jobNamer(allJobs);
+    const skippedJobs = fullRescan ? [] : allJobs.filter(unchanged).map(nameOf);
 
     // The start popup is subject to the same fixed alert height as the finish
     // one, so the counts that only matter for diagnosis go to the console.
@@ -236,7 +237,8 @@ async function run(tab, fullRescan) {
     let visitedOne = false;
 
     for (const job of jobs) {
-      const label = job.title || "Unknown job";
+      const label = job.title || "Unknown job";   // what finds the Drive folder
+      const shown = nameOf(job);                 // what the popup and log call it
       const roleId = resolveFolder(label, folders);
       const folderId = roleId ? await getOrCreateChild(roleId, SOURCE_SUBFOLDER) : null;
       // No folder it can be sure of: the job is still read, its CVs go to this
@@ -258,7 +260,7 @@ async function run(tab, fullRescan) {
       await bringToFront(tab);
       const url = await goToApplicants(tab.id, job.href);
       if (!url) {
-        detail.push(`${label}: could not open`);
+        detail.push(`${shown}: could not open`);
         continue;
       }
 
@@ -275,7 +277,7 @@ async function run(tab, fullRescan) {
       // and stopping early would walk straight past them. So: full read, which
       // is also what repairs the gap.
       const vouchedClean = job.jobId && state.jobCounts[job.jobId] !== undefined;
-      runLog.push(`\n=== ${label} (job ${job.jobId}, ${job.applicants} applicants) ===`);
+      runLog.push(`\n=== ${shown} (job ${job.jobId}, ${job.applicants} applicants) ===`);
 
       // One whole list, start to finish. The page reads one batch of 25 and says
       // where the next one starts; walking by address beats clicking Next, which
@@ -367,7 +369,7 @@ async function run(tab, fullRescan) {
 
       if (!res) {
         runLog.push("page did not respond");
-        detail.push(`${label}: page did not respond`);
+        detail.push(`${shown}: page did not respond`);
         continue;
       }
 
@@ -466,7 +468,7 @@ async function run(tab, fullRescan) {
 
       if (res.incomplete) {
         restFirst = true;
-        incompleteJobs.push(`${label}: read ${res.read} of ${res.expected ?? "?"}` +
+        incompleteJobs.push(`${shown}: read ${res.read} of ${res.expected ?? "?"}` +
           (res.reason ? ` (${res.reason})` : ""));
         if (job.jobId) {
           delete state.jobCounts[job.jobId];
@@ -489,12 +491,12 @@ async function run(tab, fullRescan) {
         `skipped ${res.skipped}, no resume ${emptyHanded.length}` +
         (folderId ? "" : ` — NO DRIVE FOLDER: ${saved} saved to this computer's Downloads`) +
         (res.incomplete ? ` — INCOMPLETE (${res.reason})` : ""));
-      console.log(`[${label}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
+      console.log(`[${shown}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
       toDrive += uploaded;
       toDownloads += saved;
       retiredThisRun += retired.length;
-      if (uploaded + saved > 0) savedPerJob.push(`${label}: ${uploaded + saved}`);
-      detail.push(`${label}: ${uploaded} to Drive` +
+      if (uploaded + saved > 0) savedPerJob.push(`${shown}: ${uploaded + saved}`);
+      detail.push(`${shown}: ${uploaded} to Drive` +
         (saved ? `, ${saved} to Downloads` : "") +
         (res.skipped ? `, ${res.skipped} already had` : "") +
         (emptyHanded.length ? `, ${emptyHanded.length} no resume` : "") +
@@ -515,7 +517,7 @@ async function run(tab, fullRescan) {
     // First thing on screen, in capitals: the one outcome where CVs are not
     // where GroundControl can see them.
     const noFolderWarning = unmatched.length
-      ? `⚠️ NO DRIVE FOLDER FOR ${capped(unmatched, 3).join(", ").toUpperCase()} — CVS SAVED TO DOWNLOADS\n\n`
+      ? `⚠️ NO DRIVE FOLDER FOR ${capped([...new Set(unmatched)], 3).join(", ").toUpperCase()} — CVS SAVED TO DOWNLOADS\n\n`
       : "";
     const finish = noFolderWarning +
       `Done — ${cvsPhrase(toDrive)} saved to Drive.` +
@@ -559,7 +561,26 @@ const appName = () => {
 };
 
 const jobsPhrase = n => `${n} job${n === 1 ? "" : "s"}`;
-const cvsPhrase = n => `${n} new CV${n === 1 ? "" : "s"}`;
+// Several open jobs can share a title — four were "Customer Success Manager" at
+// once — and a popup listing the same title four times answers nothing. Where a
+// title repeats, say who posted each one and when: "Customer Success Manager
+// (Katya, Sep 21)". A title nobody else has stays as it is.
+const jobNamer = jobs => {
+  const count = {};
+  for (const j of jobs) count[j.title] = (count[j.title] || 0) + 1;
+  return job => {
+    const title = job.title || "Unknown job";
+    if (count[job.title] < 2) return title;
+    const [m, d, y] = String(job.posted || "").split("/").map(Number);
+    const extra = [
+      job.poster && job.poster.split(/\s+/)[0],
+      y && new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    ].filter(Boolean);
+    return extra.length ? `${title} (${extra.join(", ")})` : title;
+  };
+};
+
+const cvsPhrase = n =>`${n} new CV${n === 1 ? "" : "s"}`;
 // The no-resume list is everyone ever retired, not this run's — a bare "21
 // people have no resume" under a 20-CV run read as half the run coming up
 // empty. So: the total, since when, and how many this run added. Counted per
@@ -1106,6 +1127,7 @@ function scrapeJobList() {
     // otherwise walk up to the row and take its first non-empty line.
     let title = (a.innerText || "").trim().split("\n")[0];
     let applicants = null;
+    let rowText = "";
     let row = a;
     for (let i = 0; i < 10 && row; i++) {
       const text = row.innerText || "";
@@ -1117,13 +1139,21 @@ function scrapeJobList() {
         const t = text.trim().split("\n").filter(Boolean)[0];
         if (t && t.length >= 3) title = t;
       }
-      if (applicants !== null && title && title.length >= 3) break;
+      if (applicants !== null && title && title.length >= 3) { rowText = text; break; }
       row = row.parentElement;
     }
     if (!title) continue;
 
+    // Who posted it and when: "Ground Game · Latin America (Remote) · Katya
+    // Aresti Tejada" and "Posted: 9/21/2026". Only shown where two open jobs
+    // share a title. Read only from this job's own row — never from a wider
+    // ancestor, where it would be some other job's.
+    const posted = (rowText.match(/Posted:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i) || [])[1] || null;
+    const byLine = rowText.split("\n").find(l => l.split(/[·•]/).length >= 3);
+    const poster = byLine ? byLine.split(/[·•]/).pop().trim() || null : null;
+
     seen.add(id);
-    jobs.push({ title, href, jobId: id, applicants });
+    jobs.push({ title, href, jobId: id, applicants, poster, posted });
   }
   console.log("Jobs found:", jobs.map(j => `${j.title} (${j.applicants})`));
   return jobs;
