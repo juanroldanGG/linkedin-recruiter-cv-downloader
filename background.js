@@ -226,6 +226,7 @@ async function run(tab, fullRescan) {
           `This tab will move between pages on its own. Keep it in front and don't touch it — ` +
           `LinkedIn doesn't load applicants in a background tab.`
     ]);
+    const startedAt = Date.now();   // after OK, so the popup's "in N min" is the run, not the wait
 
     if (jobs.length === 0) {
       await inject(tab.id, () => alert(
@@ -537,7 +538,7 @@ async function run(tab, fullRescan) {
       ? `⚠️ NO DRIVE FOLDER FOR ${capped([...new Set(unmatched)], 3).join(", ").toUpperCase()} — CVS SAVED TO DOWNLOADS\n\n`
       : "";
     const finish = noFolderWarning +
-      `Done — ${cvsPhrase(toDrive)} saved to Drive.` +
+      `Done — ${cvsPhrase(toDrive)} saved to Drive in ${finishedIn(startedAt)}.` +
       (toDownloads ? `\n${toDownloads} went to the Downloads folder instead.` : "") +
       (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
       (incompleteJobs.length
@@ -600,6 +601,11 @@ const jobNamer = jobs => {
 };
 
 const cvsPhrase = n =>`${n} new CV${n === 1 ? "" : "s"}`;
+// The finish popup waits for OK, so it can sit on screen for an hour and nobody
+// can tell when the run actually ended. Say it: "13 min (finished 9:01 AM)".
+const finishedIn = t0 =>
+  `${Math.max(1, Math.round((Date.now() - t0) / 60000))} min ` +
+  `(finished ${new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })})`;
 // The no-resume list is everyone ever retired, not this run's — a bare "21
 // people have no resume" under a 20-CV run read as half the run coming up
 // empty. So: the total, since when, and how many this run added. Counted per
@@ -1189,7 +1195,10 @@ function scrapeJobList() {
     // share a title. Read only from this job's own row — never from a wider
     // ancestor, where it would be some other job's.
     const posted = (rowText.match(/Posted:\s*(\d{1,2}\/\d{1,2}\/\d{4})/i) || [])[1] || null;
-    const byLine = rowText.split("\n").find(l => l.split(/[·•]/).length >= 3);
+    // The live page puts each "·" on a line of its own (seen 2026-09-28), so
+    // glue those back into one line before looking for it.
+    const byLine = rowText.replace(/\s*\n\s*([·•])\s*\n\s*/g, " $1 ")
+      .split("\n").find(l => l.split(/[·•]/).length >= 3);
     const poster = byLine ? byLine.split(/[·•]/).pop().trim() || null : null;
 
     seen.add(id);

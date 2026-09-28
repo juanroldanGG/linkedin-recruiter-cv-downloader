@@ -313,6 +313,30 @@ const SOURCE_SUB = "LinkedIn";
   console.log(`ok    job titles find their own folder and never someone else's (${cases.length} cases)`);
 }
 
+// --- who posted a job, read off the Jobs page -------------------------------
+// The one page-world function run for real here: a job row's text, copied from
+// the live page on 2026-09-28. Every "·" sits on a line of its own, which the
+// first version didn't expect, so twin titles showed only "(Sep 21)" — twice.
+{
+  const { scrapeJobList } = new Function("chrome", "fetch", "alert",
+    src + "\nreturn { scrapeJobList };")(chrome, global.fetch, global.alert);
+  const row = { parentElement: null, innerText:
+    "Select “Customer Success Manager”\n\t\nCustomer Success Manager\n Open\nGround Game\n·\n" +
+    "Latin America (Remote)\n·\nKatya Aresti Tejada\nPosted: 9/21/2026 (Expiring in 23 days)\n" +
+    "Contract:\nRECRUITER-Ground Game LLC\nProject:\ncsm-k\n\t\nViews: 1078\n1,078 job views\n" +
+    "Applicants:\n189\n189 applicants\nSee more" };
+  const link = { href: "https://www.linkedin.com/talent/hire/2146298914/discover/applicants",
+    getAttribute: () => "/talent/hire/2146298914/discover/applicants",
+    innerText: "Customer Success Manager", parentElement: row };
+  global.document = { querySelectorAll: () => [link] };
+  const realLog = console.log; console.log = () => {};
+  const [job] = scrapeJobList();
+  console.log = realLog; delete global.document;
+  assert.deepStrictEqual([job.title, job.applicants, job.poster, job.posted],
+    ["Customer Success Manager", 189, "Katya Aresti Tejada", "9/21/2026"], JSON.stringify(job));
+  console.log("ok    a job row gives its title, applicants, poster and posted date");
+}
+
 // --- load and run -----------------------------------------------------------
 new Function("chrome", "fetch", "alert", src)(chrome, global.fetch, global.alert);
 assert.ok(state.clickHandler, "background.js never registered the toolbar click handler");
@@ -829,6 +853,8 @@ const withMiss = () => ({
   const twinFinish = state.alerts.find(a => a.includes("Done —")) || "";
   assert.ok(twinFinish.includes("Customer Success Manager (Tanya, Sep 16): 1"),
     "a repeated title says whose and when:\n" + twinFinish);
+  assert.ok(/saved to Drive in \d+ min \(finished \d{1,2}:\d{2} [AP]M\)\./.test(twinFinish),
+    "the popup says how long the run took and when it ended:\n" + twinFinish);
   assert.ok((state.driveFiles["_cv-downloader-last-run-linkedin.log"] || "")
     .includes("=== Customer Success Manager (Katya, Sep 21) (job"), "and so does the run log");
   BUSY.title = realBusyTitle;

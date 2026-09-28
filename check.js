@@ -12,7 +12,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "ut
 const source = fs.readFileSync(path.join(dir, "background.js"), "utf8");
 
 // chrome.* namespaces that need no permission entry
-const FREE = new Set(["action", "runtime", "i18n", "extension"]);
+const FREE = new Set(["action", "runtime", "i18n", "extension", "windows"]);
 
 const used = [...new Set((source.match(/chrome\.([a-zA-Z]+)/g) || [])
   .map(m => m.split(".")[1]))].filter(ns => !FREE.has(ns));
