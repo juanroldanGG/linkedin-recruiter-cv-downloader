@@ -7,6 +7,27 @@ re-downloads a CV a colleague already got.
 5.0 is 4.0 plus one idea — **know when not to work**. 4.0 opened every job and
 re-tried every dead end on every run. 5.0 doesn't.
 
+## Since 5.28: the safety net for LinkedIn's emails
+
+Since 2026-09-28 GroundControl reads LinkedIn's "New application" emails (the
+CV is attached) from the recruiters' inboxes every 15 minutes and files each CV
+into `<role>/LinkedIn/`, tagged `source=linkedin-email`. That covers about 98% of
+applicants within minutes. The other ~2% never get an email — checked in
+Google's email logs the same day — and only this extension catches them.
+
+So once a day is enough. Each job, the extension reads which applicants' CVs
+the emails already filed and skips those people: no download, no profile
+visit, marked done. It still fetches everyone else. The finish popup says how
+many were already there.
+
+The match is on the exact name (the name the file was uploaded under, which
+survives GroundControl renaming it). Names agree 89% of the time: LinkedIn's
+email sometimes gives a longer name than Recruiter's list ("Jose Fdo. Jaramillo"
+vs "Jose Jaramillo"). Those still get fetched, which makes a duplicate
+GroundControl merges after scoring. A looser match would skip more, but could
+skip a different person with a similar name — and if that is one LinkedIn never
+emailed, their CV would be lost.
+
 ## What changed from 4.0
 
 | | 4.0 | 5.0 |

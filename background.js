@@ -245,6 +245,7 @@ async function run(tab, fullRescan) {
     let toDrive = 0;
     let toDownloads = 0;
     let retiredThisRun = 0;
+    let viaEmails = 0;
     const incompleteJobs = [];
     const runLog = [`${jobs.length} of ${allJobs.length} jobs, full rescan: ${!!fullRescan}`];
 
@@ -265,6 +266,21 @@ async function run(tab, fullRescan) {
       // never sent on by a later run. Now the run after the folder exists
       // uploads them.
       if (!folderId) unmatched.push(label);
+      const fromEmails = folderId ? await namesFromEmails(folderId) : new Set();
+      let viaEmailsHere = 0;
+      // Already in Drive from LinkedIn's application email: counted as done,
+      // never downloaded again.
+      const coveredByEmail = item => {
+        if (!fromEmails.has(personKey(item.name))) return false;
+        if (item.key) {
+          done.add(item.key);
+          delete state.misses[item.key];     // their CV turned up after all
+          delete state.noResume[item.key];
+          clearedMisses.add(item.key);
+        }
+        viaEmailsHere++;
+        return true;
+      };
 
       if (restFirst) {
         runLog.push(`\n-- last job came up short; resting ${COOLDOWN_WAIT / 1000}s before the next --`);
@@ -415,6 +431,7 @@ async function run(tab, fullRescan) {
       // which is the real record, before anyone earns a strike.
       const emptyHanded = [];
       for (const item of (res.failedItems || []).concat(res.noCvItems || [])) {
+        if (coveredByEmail(item)) continue;
         const [projectId, profileId] = item.key.split(":");
         await navigate(tab.id,
           `https://www.linkedin.com/talent/profile/${profileId}/attachments?project=${projectId}`);
@@ -425,6 +442,7 @@ async function run(tab, fullRescan) {
 
       let uploaded = 0, saved = 0, uploadFailed = 0;
       for (const item of res.urls) {
+        if (coveredByEmail(item)) continue;
         const filename = `${safeName(item.name) || "resume"}.pdf`;
         const ok = folderId ? await uploadToDrive(item.url, filename, folderId) : false;
         if (ok) {
@@ -506,17 +524,19 @@ async function run(tab, fullRescan) {
       await chrome.storage.local.set({ doneKeys: Array.from(done), laptopKeys: Array.from(onLaptop) });
 
       runLog.push(`result: read ${res.read} of ${res.expected ?? "?"}, uploaded ${uploaded}, ` +
-        `skipped ${res.skipped}, no resume ${emptyHanded.length}` +
+        `skipped ${res.skipped}, from emails ${viaEmailsHere}, no resume ${emptyHanded.length}` +
         (folderId ? "" : ` — NO DRIVE FOLDER: ${saved} saved to this computer's Downloads`) +
         (res.incomplete ? ` — INCOMPLETE (${res.reason})` : ""));
       console.log(`[${shown}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
       toDrive += uploaded;
       toDownloads += saved;
+      viaEmails += viaEmailsHere;
       retiredThisRun += retired.length;
       if (uploaded + saved > 0) savedPerJob.push(`${shown}: ${uploaded + saved}`);
       detail.push(`${shown}: ${uploaded} to Drive` +
         (saved ? `, ${saved} to Downloads` : "") +
         (res.skipped ? `, ${res.skipped} already had` : "") +
+        (viaEmailsHere ? `, ${viaEmailsHere} already in Drive from LinkedIn's emails` : "") +
         (emptyHanded.length ? `, ${emptyHanded.length} no resume` : "") +
         (retired.length ? ` (${retired.length} retired)` : "") +
         (res.stoppedEarly ? " [stopped early — rest already had]" : "") +
@@ -540,6 +560,7 @@ async function run(tab, fullRescan) {
     const finish = noFolderWarning +
       `Done — ${cvsPhrase(toDrive)} saved to Drive in ${finishedIn(startedAt)}.` +
       (toDownloads ? `\n${toDownloads} went to the Downloads folder instead.` : "") +
+      (viaEmails ? `\n${viaEmails} more were already in Drive from LinkedIn's application emails.` : "") +
       (savedPerJob.length ? `\n\n${capped(savedPerJob).join("\n")}` : "") +
       (incompleteJobs.length
         ? `\n\nCouldn't read every applicant:\n${capped(incompleteJobs, 4).join("\n")}\n\n` +
@@ -651,6 +672,42 @@ async function driveFetch(url, options = {}, retry = true) {
   }
   return res;
 }
+
+// Who LinkedIn's application emails already put in this <role>/LinkedIn
+// folder. Since 2026-09-28 GroundControl reads those emails every 15 minutes
+// and files each CV here within minutes of the application, tagged
+// source=linkedin-email — so this extension is now the safety net for the ~2%
+// of applicants LinkedIn never emails (checked in Google's email logs that
+// day). Downloading everyone again only made duplicates: the email carries the
+// applicant's original Word file, this extension saves LinkedIn's PDF of it,
+// and two different files are two candidates until GroundControl merges them.
+// Names, not file contents, for exactly that reason. originalFilename is the
+// name it was uploaded under, which survives GroundControl renaming the file.
+// Can't tell (Drive error): an empty set, so everyone downloads as before — a
+// duplicate beats a gap.
+// ponytail: two applicants with the same full name on one role look like one;
+// the second is only lost if LinkedIn also never emailed them.
+async function namesFromEmails(folderId) {
+  const names = new Set();
+  let pageToken = "";
+  do {
+    const q = encodeURIComponent(
+      `'${folderId}' in parents and appProperties has { key='source' and value='linkedin-email' }`
+    );
+    const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=nextPageToken,files(name,originalFilename)` +
+      `&pageSize=1000&${DRIVE_ARGS}` + (pageToken ? `&pageToken=${pageToken}` : "");
+    const res = await driveFetch(url);
+    if (!res || !res.ok) return new Set();
+    const data = await res.json();
+    for (const f of data.files || []) names.add(personKey(f.originalFilename || f.name));
+    pageToken = data.nextPageToken || "";
+  } while (pageToken);
+  return names;
+}
+
+// "Ana Pérez.docx", "ana perez", "Pérez, Ana" → the same person.
+const personKey = s => String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase()
+  .replace(/\.(pdf|docx?)$/, "").split(/[^a-z0-9]+/).filter(Boolean).sort().join(" ");
 
 // name -> folderId for every subfolder of the CV folder. null on failure.
 async function listSubfolders(parentId) {

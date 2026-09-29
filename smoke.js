@@ -174,6 +174,11 @@ global.fetch = async (url, opts = {}) => {
 
   if (url.includes("/drive/v3/files?q=")) {
     const q = decodeURIComponent(url);
+    // What GroundControl's email reader already filed into a LinkedIn folder.
+    if (q.includes("appProperties has")) {
+      state.emailQueries = (state.emailQueries || 0) + 1;
+      return ok({ files: q.includes("'sub-linkedin' in parents") ? state.emailFiles || [] : [] });
+    }
     if (q.includes("mimeType='application/vnd.google-apps.folder'") && !q.includes("name='")) {
       return ok({ files: [{ id: "role-csm", name: "Customer Success Manager" },
                           { id: "role-nsa", name: "Netsuite Admin" }] });
@@ -903,6 +908,39 @@ const withMiss = () => ({
   assert.strictEqual(state.pdfUploads, uploadsBeforeFolder + 1, "so it reaches Drive");
   assert.ok(readLedger().keys.includes(KEY("laptop")), "and only then is it marked done");
   console.log("ok    no folder: saved to this computer, warned first, sent to Drive once the folder exists");
+
+  // ---- CVs LinkedIn already emailed are not fetched again ------------------
+  // Since 2026-09-28 GroundControl files the CV from each LinkedIn application
+  // email into the role's LinkedIn folder within minutes, tagged
+  // source=linkedin-email. The extension is the safety net for the ~2% LinkedIn
+  // never emails; fetching the rest again only made duplicates — the email has
+  // the applicant's Word original, this saves LinkedIn's PDF of it. Someone
+  // whose CV is already there by name counts as done and is never fetched.
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.emailFiles = [
+    { name: "Perez_Ana_Maria.docx", originalFilename: "Ana Pérez.docx" }, // renamed from the CV since; the upload name counts
+    { name: "Cy Jones.pdf", originalFilename: "Cy Jones.pdf" }
+  ];
+  state.scrapeQueue = [
+    { urls: [{ name: "Ana Perez", url: "https://media.example/ana.pdf", key: KEY("ana") },
+             { name: "Bo Smith", url: "https://media.example/bo.pdf", key: KEY("bo") }],
+      skipped: 0, failedItems: [], noCvItems: [{ name: "Cy Jones", key: KEY("cy"), href: "" }],
+      stoppedEarly: false, expected: 3, read: 3, reason: "", slots: 3, shown: 3 },
+    cleanPage()
+  ];
+  const uploadsBeforeEmails = state.pdfUploads;
+  await run();
+  assert.strictEqual(state.pdfUploads, uploadsBeforeEmails + 1, "only Bo, whom no email brought, is fetched");
+  assert.ok(!state.navigated.some(u => u.includes("/attachments")),
+    "Cy's profile is not opened to look for a CV the email already brought:\n" + state.navigated.join("\n"));
+  const keysAfterEmails = readLedger().keys || [];
+  assert.ok(keysAfterEmails.includes(KEY("ana")) && keysAfterEmails.includes(KEY("cy")),
+    "both count as done, so no later run looks at them again");
+  const emailsFinish = state.alerts.find(a => a.includes("Done —")) || "";
+  assert.ok(emailsFinish.includes("2 more were already in Drive from LinkedIn's application emails."),
+    "and the popup says why they weren't fetched:\n" + emailsFinish);
+  state.emailFiles = [];
+  console.log("ok    applicants whose CV LinkedIn already emailed are not fetched again");
 
   // ---- the log keeps a history, newest on top, capped --------------------
   // When it held only the latest run, "how far did last night's get?" had no
