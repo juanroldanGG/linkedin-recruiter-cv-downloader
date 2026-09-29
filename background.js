@@ -1450,7 +1450,6 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   // is deliberately read-only — it observes what is already on screen and can't
   // affect which CVs get taken.
   const rowsSeen = new Map();      // rowId -> {name, href}
-  const rowsWithResume = new Set();
 
   function noteRows() {
     for (const a of document.querySelectorAll("a[href*='/talent/profile/']")) {
@@ -1463,11 +1462,6 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
           name: (a.innerText || "").split("\n")[0].replace(/\s*·.*$/, "").trim() || "(unknown)",
           href: a.href
         });
-      }
-      if (row.querySelector("[data-test-decoration-resume-download-link]") ||
-          Array.from(row.querySelectorAll("a, button"))
-               .some(e => (e.innerText || "").trim().toLowerCase() === "resume")) {
-        rowsWithResume.add(id);
       }
     }
   }
@@ -1613,6 +1607,13 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
       // with while it's showing. The list is re-read on every step: Recruiter
       // rebuilds it mid-page, and holding the first batch of slots would end
       // the page early on whatever was left.
+      // A row's Resume button is drawn a few seconds after the row itself.
+      // Walking at full speed reached 17 of 25 people on a page before their
+      // button existed (measured on Founding Systems Engineer, 2026-09-29), and
+      // passed them over. So wait for the page's buttons to start arriving, and
+      // give each row a moment of its own. A page where nobody attached a CV
+      // waits out the first timeout once.
+      await waitFor(() => slots().some(li => slotResumeLink(li)), 10000);
       for (let i = 0; i < slots().length; i++) {
         await waitVisible();
         const li = slots()[i];
@@ -1620,6 +1621,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
         li.scrollIntoView({ block: "center" });
         const mounted = await waitFor(() => !!li.querySelector("a[href*='/talent/profile/']"), 8000);
         mounted ? drawn++ : (blank++, blanks++);
+        if (mounted) await waitFor(() => !!slotResumeLink(li), 1500);
         noteRows();
         const link = slotResumeLink(li);
         if (link && await handle(link, page)) break;
@@ -1669,11 +1671,14 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
   noteRows();
   window.open = origOpen;
 
-  // Rows with no Resume link are only suspects; the caller checks each one's
-  // Attachments page before counting it, so no list-wide sanity guard is needed.
+  // Everyone seen and not taken, whatever their row showed, goes to the caller,
+  // which checks each one's Attachments page before counting them. Nobody seen
+  // is dropped: this used to leave out rows that had a Resume button by the
+  // end of the page but not when we got to them — counted as having a CV,
+  // never downloaded, never reported.
   const noCvItems =
     Array.from(rowsSeen.entries())
-      .filter(([id]) => !rowsWithResume.has(id))
+      .filter(([id]) => !seen.has(id))
       .map(([id, v]) => ({ name: v.name, key: `${projectId}:${id}`, href: v.href }))
       .filter(item => !skip.has(item.key));
 
