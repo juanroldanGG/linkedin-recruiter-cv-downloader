@@ -530,9 +530,12 @@ const withMiss = () => ({
     "the profile's Attachments page should have been checked");
   console.log("ok    a row missing its Resume link is rescued from the profile's attachments");
 
-  // ---- run 9: full rescan un-retires someone who had a CV all along ---------
-  // Ghost One was retired in run 6. A full rescan skips nobody, finds the CV on
-  // their profile, and must take them off the no-resume list for good.
+  // ---- run 9: a full re-check un-retires someone who had a CV all along -----
+  // Ghost One was retired in run 6. A full re-check gives the retired a second
+  // look, finds the CV on their profile, and must take them off the no-resume
+  // list for good. It still skips every CV already in Drive: it used to skip
+  // nobody, which on the real account meant thousands of duplicate downloads.
+  const doneBeforeRecheck = readLedger().keys || [];
   state.attachments.ghost1 = "https://media.example/ghost1.pdf";
   scrapeResult = {
     urls: [], skipped: 0, failedItems: [], stoppedEarly: false,
@@ -540,19 +543,23 @@ const withMiss = () => ({
       { name: "Ghost One", key: KEY("ghost1"), href: "https://www.linkedin.com/talent/profile/ghost1" }
     ]
   };
-  state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = [];
+  state.navigated = []; state.alerts = []; state.logs = []; state.skipKeysSeen = []; state.vouchedSeen = [];
   state.tabUrl = "https://www.linkedin.com/talent/jobs";
   await state.contextMenuHandler({ menuItemId: "full-rescan" },
     { id: 1, windowId: 1, url: "https://www.linkedin.com/talent/jobs" });
 
-  assert.deepStrictEqual(state.skipKeysSeen[0], [], "a full rescan must skip nobody");
+  assert.ok(doneBeforeRecheck.length > 0 && doneBeforeRecheck.every(k => state.skipKeysSeen[0].includes(k)),
+    "a full re-check still skips every CV already in Drive");
+  assert.ok(!state.skipKeysSeen[0].includes(KEY("ghost1")), "but gives the retired a second look");
+  assert.strictEqual(state.vouchedSeen[0], false,
+    "and reads every list in full — it never stops early, even on a job that finished clean");
   assert.ok(state.navigated.some(u => u.includes(QUIET.jobId)),
-    "a full rescan must open even a job whose count has not moved");
+    "a full re-check must open even a job whose count has not moved");
   s = readState();
   assert.ok(!s.noResume[KEY("ghost1")], "someone whose CV turned up must leave the no-resume list");
   assert.ok(!state.driveFiles["_no-resume-candidates-linkedin.csv"].includes("Ghost One"),
     "and the recruiter worklist");
-  console.log("ok    a full rescan skips nobody and un-retires anyone whose CV turns up");
+  console.log("ok    a full re-check reads every list, skips what's in Drive, and un-retires anyone whose CV turns up");
 
   // ---- run 10: the read comes up short of the list's own total --------------
   // The Customer Success Manager case: 189 read of 261, marked done anyway, and

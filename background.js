@@ -110,7 +110,7 @@ const DRIVE_ARGS = "supportsAllDrives=true&includeItemsFromAllDrives=true";
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "full-rescan",
-    title: "Full rescan (check everyone, ignore already-downloaded)",
+    title: "Re-check every job in full (skips CVs already in Drive)",
     contexts: ["action"]
   });
 });
@@ -216,8 +216,9 @@ async function run(tab, fullRescan) {
     await inject(tab.id, hideToast);   // the start popup replaces the "starting" note
     await inject(tab.id, m => alert(m), [
       fullRescan
-        ? `${appName()} starting a FULL RESCAN.\n\n` +
-          `Every applicant on ${jobsPhrase(allJobs.length)} will be checked again — this takes a lot longer.\n\n` +
+        ? `${appName()} starting a FULL RE-CHECK.\n\n` +
+          `Every applicant on ${jobsPhrase(allJobs.length)} will be looked at again — this takes a lot longer. ` +
+          `CVs already in Drive are not downloaded twice.\n\n` +
           `This tab will move between pages on its own. Keep it in front and don't touch it — ` +
           `LinkedIn doesn't load applicants in a background tab.`
         : `${appName()} starting.\n\n` +
@@ -299,18 +300,22 @@ async function run(tab, fullRescan) {
       }
 
       // Retired people are skipped inside the page, so they are never clicked
-      // and never cost the ten seconds it takes to fail. A full rescan skips
-      // nobody — that's the whole point.
+      // and never cost the ten seconds it takes to fail. A full re-check gives
+      // them a second look, but still skips what is already in Drive: it used to
+      // skip nobody and re-download every CV on every job — thousands, all
+      // duplicates. What it is for is the people a run passed over (before 5.29,
+      // anyone whose Resume button was drawn late), and those were never done.
       // With no folder, whatever is already on this laptop is skipped too; with
       // one, it isn't, which is what gets those CVs into Drive at last.
-      const skipKeys = (fullRescan ? [] : Array.from(done).concat(Object.keys(state.noResume)))
+      const skipKeys = Array.from(done).concat(fullRescan ? [] : Object.keys(state.noResume))
         .concat(folderId ? [] : Array.from(onLaptop));
 
       // A banked count is this job's certificate that last time finished clean.
       // Without one, somebody further down the list may still be unfinished,
       // and stopping early would walk straight past them. So: full read, which
-      // is also what repairs the gap.
-      const vouchedClean = job.jobId && state.jobCounts[job.jobId] !== undefined;
+      // is also what repairs the gap. A full re-check never stops early — the
+      // people it is looking for sit among the ones already done.
+      const vouchedClean = !fullRescan && job.jobId && state.jobCounts[job.jobId] !== undefined;
       runLog.push(`\n=== ${shown} (job ${job.jobId}, ${job.applicants} applicants) ===`);
 
       // One whole list, start to finish. The page reads one batch of 25 and says

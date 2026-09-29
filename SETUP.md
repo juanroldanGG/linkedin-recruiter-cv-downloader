@@ -96,6 +96,14 @@ rewrites the ledger from scratch and would silently erase extra fields; a file i
 never touches cannot be clobbered. Delete it to force a full re-scan of every
 job — no CVs are re-downloaded, the ledger still remembers those.
 
+The same without touching Drive: right-click the toolbar icon → **Re-check every
+job in full**. It reads every applicant list to the end, skips every CV already
+in Drive, and gives people retired as "no resume" a second look. Before 5.30
+this option skipped nobody and re-downloaded every CV on every job. Worth one
+run after 5.29: before it, anyone whose Resume button LinkedIn drew a second
+late was passed over without a trace — 17 of 25 on one page — and a re-check is
+what finds them. It is heavy on LinkedIn; one run, not a habit.
+
 **`_no-resume-candidates-linkedin.csv`** — the recruiter-facing worklist. Name,
 job, first seen, and a link straight to the LinkedIn profile. Rewritten in full
 on every run. Opens directly in Drive as a table.
