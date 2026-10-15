@@ -28,6 +28,19 @@ GroundControl merges after scoring. A looser match would skip more, but could
 skip a different person with a similar name — and if that is one LinkedIn never
 emailed, their CV would be lost.
 
+## Since 5.31: who ran it, and when
+
+Every finished run adds one line, newest on top, to `_cv-downloader-runs-linkedin.csv`
+in the CV folder (opens in Drive as a table): when (Bogota time), who was signed in,
+CVs saved, already had, already in Drive from the emails, retired as no-resume,
+jobs not fully read, minutes, and whether it was the daily run or a full re-check.
+The last 400 runs are kept. The page-by-page log (`_cv-downloader-last-run-linkedin.log`)
+now also names who ran each one.
+
+The signed-in address comes from Drive itself, so no new permission. If Drive won't
+say, the line reads `unknown`. A run that crashes before it finishes writes no line:
+a gap in this file is a run that did not complete, or never started.
+
 ## What changed from 4.0
 
 | | 4.0 | 5.0 |

@@ -71,6 +71,15 @@ const RUN_LOG_FILE = "_cv-downloader-last-run-linkedin.log";
 const RUN_LOG_KEEP = 30;
 const RUN_LOG_SEPARATOR = "\n\n" + "=".repeat(72) + "\n\n";
 
+// One line per finished run — who ran it, when, what it found — for the people
+// who need to know that the daily run happened, not how each page went. A CSV so
+// it opens in Drive as a table. Newest on top, last RUNS_KEEP kept. Its own file:
+// the shared ledger's shape stays untouched.
+const RUNS_FILE = "_cv-downloader-runs-linkedin.csv";
+const RUNS_KEEP = 400;
+const RUNS_HEADER = "When (Bogota),Who,Saved to Drive,Already had,Already in Drive from emails," +
+  "Retired no-resume,Jobs not fully read,Minutes,Mode";
+
 // Misses before someone is retired. Two, not one, so a slow-loading page can
 // never strand a real candidate.
 const NO_RESUME_STRIKES = 2;
@@ -244,6 +253,7 @@ async function run(tab, fullRescan) {
     const savedPerJob = [];
     const unmatched = [];
     let toDrive = 0;
+    let alreadyHad = 0;
     let toDownloads = 0;
     let retiredThisRun = 0;
     let viaEmails = 0;
@@ -534,6 +544,7 @@ async function run(tab, fullRescan) {
         (res.incomplete ? ` — INCOMPLETE (${res.reason})` : ""));
       console.log(`[${shown}] uploaded ${uploaded}, local ${saved}, skipped ${res.skipped}, no resume ${emptyHanded.length}`);
       toDrive += uploaded;
+      alreadyHad += res.skipped || 0;
       toDownloads += saved;
       viaEmails += viaEmailsHere;
       retiredThisRun += retired.length;
@@ -549,10 +560,16 @@ async function run(tab, fullRescan) {
     }
 
     await writeNoResumeList(state);
-    const thisRun = `${appName()} — run finished ${new Date().toISOString()}\n\n${runLog.join("\n")}\n`;
+    const who = await whoAmI();
+    const thisRun = `${appName()} — run finished ${new Date().toISOString()} — run by ${who}\n\n${runLog.join("\n")}\n`;
     const earlierRuns = (await readTextFile(RUN_LOG_FILE)).split(RUN_LOG_SEPARATOR);
     await upsertFile(RUN_LOG_FILE, "text/plain",
       [thisRun, ...earlierRuns].filter(r => r.trim()).slice(0, RUN_LOG_KEEP).join(RUN_LOG_SEPARATOR));
+    await appendRunRow({
+      who, toDrive, alreadyHad, viaEmails, retired: retiredThisRun, incomplete: incompleteJobs.length,
+      minutes: Math.max(1, Math.round((Date.now() - startedAt) / 60000)),
+      mode: fullRescan ? "full re-check" : "daily"
+    });
     await navigate(tab.id, startUrl);
     console.log("Run detail:\n" + detail.join("\n"));
 
@@ -889,6 +906,37 @@ async function writeState(state) {
   state.misses = merged.misses;
   state.jobCounts = merged.jobCounts;
   return state;
+}
+
+// Who is signed in to Drive on this browser, for the run record. Asked of Drive
+// itself, which the existing "drive" scope already allows, so no new permission.
+// Never throws: a run must not fail because it couldn't name its user.
+async function whoAmI() {
+  try {
+    const res = await driveFetch("https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)");
+    const data = res && res.ok ? await res.json() : null;
+    return (data && data.user && data.user.emailAddress) || "unknown";
+  } catch (e) {
+    return "unknown";
+  }
+}
+
+// Adds this run to the top of the runs file. Read-then-write, like the run log:
+// two people finishing in the same second can lose a row, which is acceptable
+// for a record that exists to be glanced at. Never fails the run.
+async function appendRunRow(r) {
+  try {
+    const when = new Date().toLocaleString("sv-SE", { timeZone: "America/Bogota" });
+    const esc = v => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+    const row = [when, r.who, r.toDrive, r.alreadyHad, r.viaEmails, r.retired, r.incomplete, r.minutes, r.mode]
+      .map(esc).join(",");
+    const old = (await readTextFile(RUNS_FILE)).replace(/^﻿/, "").split(/\r?\n/)
+      .filter(l => l.trim() && l !== RUNS_HEADER);
+    const csv = "﻿" + [RUNS_HEADER, row, ...old].slice(0, RUNS_KEEP + 1).join("\r\n");
+    await upsertFile(RUNS_FILE, "text/csv", csv);
+  } catch (e) {
+    console.warn("Couldn't write the runs file:", e);
+  }
 }
 
 // The recruiter-facing list. Rewritten in full on every run so it never drifts

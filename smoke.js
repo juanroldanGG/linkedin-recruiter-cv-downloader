@@ -165,6 +165,10 @@ global.fetch = async (url, opts = {}) => {
     return ok({ id });
   }
 
+  if (url.includes("/drive/v3/about")) {
+    return ok({ user: { emailAddress: state.signedInAs || "tanya@groundgamesales.com" } });
+  }
+
   if (url.includes("alt=media")) {
     const id = (url.match(/\/files\/([^?]+)/) || [])[1];
     const raw = state.driveFiles[state.idToName[id]] || "";
@@ -966,6 +970,29 @@ const withMiss = () => ({
   assert.strictEqual(runs.length, 30, "30 runs kept, got " + runs.length);
   assert.ok(!runs.some(r => r.includes("old run 30")), "and the oldest drops off");
   console.log("ok    the log keeps the last 30 runs, newest first");
+
+  // ---- who ran it, when: one line per finished run -----------------------
+  // Juan is away and a colleague runs this daily; "did she run it?" must be
+  // answerable from Drive without reading page-by-page logs.
+  const RUNS = "_cv-downloader-runs-linkedin.csv";
+  assert.ok(runs[0].includes("run by tanya@groundgamesales.com"),
+    "the run log names who ran it:\n" + runs[0]);
+  const runsCsv = state.driveFiles[RUNS] || "";
+  const runRows = runsCsv.replace(/^﻿/, "").split(/\r?\n/).filter(Boolean);
+  assert.ok(runRows[0].startsWith("When (Bogota),Who,Saved to Drive"), "the runs file has its header:\n" + runsCsv);
+  assert.ok(runRows[1].includes('"tanya@groundgamesales.com"'), "and the newest row names who:\n" + runsCsv);
+  const rowsBefore = runRows.length;
+  state.signedInAs = "juan@groundgamesales.com";
+  BUSY.applicants += 1; QUIET.applicants += 1;
+  state.scrapeQueue = [cleanPage(), cleanPage()];
+  state.navigated = []; state.alerts = []; state.logs = [];
+  await run();
+  const runRows2 = state.driveFiles[RUNS].replace(/^﻿/, "").split(/\r?\n/).filter(Boolean);
+  assert.strictEqual(runRows2.length, rowsBefore + 1, "a second run adds one row, not a rewrite");
+  assert.ok(runRows2[1].includes('"juan@groundgamesales.com"') && runRows2[2].includes('"tanya@groundgamesales.com"'),
+    "newest on top:\n" + runRows2.join("\n"));
+  state.signedInAs = null;
+  console.log("ok    every finished run adds one line saying who ran it and when");
 
   // ---- a second click while a run is going -------------------------------
   // The first seconds of a run are silent, which is exactly when a second click
