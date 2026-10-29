@@ -459,7 +459,9 @@ async function run(tab, fullRescan) {
       for (const item of res.urls) {
         if (coveredByEmail(item)) continue;
         const filename = `${safeName(item.name) || "resume"}.pdf`;
-        const ok = folderId ? await uploadToDrive(item.url, filename, folderId) : false;
+        const [pj, pf] = String(item.key || "").split(":");
+        const profileUrl = pf ? `https://www.linkedin.com/talent/profile/${pf}?project=${pj}` : "";
+        const ok = folderId ? await uploadToDrive(item.url, filename, folderId, profileUrl) : false;
         if (ok) {
           uploaded++;
         } else {
@@ -995,7 +997,8 @@ async function getOrCreateChild(parentId, name) {
 }
 
 // Fetches the signed LinkedIn PDF and multipart-uploads it into the folder.
-async function uploadToDrive(pdfUrl, filename, folderId) {
+// The Recruiter profile link rides along as appProperties.linkedinUrl.
+async function uploadToDrive(pdfUrl, filename, folderId, profileUrl) {
   try {
     let res = await fetch(pdfUrl);
     if (!res.ok) res = await fetch(pdfUrl, { credentials: "include" });
@@ -1003,7 +1006,8 @@ async function uploadToDrive(pdfUrl, filename, folderId) {
     const blob = await res.blob();
 
     const boundary = "cvdl" + folderId.slice(0, 8) + filename.length;
-    const meta = JSON.stringify({ name: filename, parents: [folderId] });
+    const meta = JSON.stringify({ name: filename, parents: [folderId],
+      ...(profileUrl && { appProperties: { linkedinUrl: profileUrl } }) });
     const body = new Blob([
       `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n`,
       `--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`,

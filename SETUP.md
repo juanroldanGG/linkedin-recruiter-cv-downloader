@@ -41,6 +41,14 @@ The signed-in address comes from Drive itself, so no new permission. If Drive wo
 say, the line reads `unknown`. A run that crashes before it finishes writes no line:
 a gap in this file is a run that did not complete, or never started.
 
+## Since 5.32: profile link on each CV
+
+Every CV the extension uploads carries the candidate's Recruiter profile link in the
+Drive file's `appProperties`, key `linkedinUrl`
+(`https://www.linkedin.com/talent/profile/<id>?project=<id>`). It needs a Recruiter login
+to open; the public `linkedin.com/in/...` address is not on the list page, so it is not saved.
+The shared ledger is unchanged.
+
 ## What changed from 4.0
 
 | | 4.0 | 5.0 |

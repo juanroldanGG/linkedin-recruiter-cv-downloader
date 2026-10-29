@@ -25,6 +25,7 @@ const state = {
   driveFiles: {},        // name -> string contents
   idToName: {},          // drive id -> name
   pdfUploads: 0,
+  pdfMeta: [],
   navigated: [],
   alerts: [],
   logs: [],
@@ -152,7 +153,7 @@ global.fetch = async (url, opts = {}) => {
   }
 
   if (url.includes("/upload/drive/v3/files")) {
-    if (typeof opts.body !== "string") { state.pdfUploads++; return ok({ id: "pdf" }); }
+    if (typeof opts.body !== "string") { state.pdfUploads++; state.pdfMeta.push(await opts.body.text()); return ok({ id: "pdf" }); }
     const idMatch = url.match(/\/files\/([^?]+)/);
     if (idMatch) {                                   // PATCH, overwriting
       state.driveFiles[state.idToName[idMatch[1]]] = opts.body;
@@ -398,6 +399,9 @@ const withMiss = () => ({
   assert.strictEqual(state.pdfUploads, 1, "the one new CV should have reached Drive");
   assert.ok(readLedger().keys.includes(KEY("new1")), "the new person should be remembered");
   console.log("ok    a new applicant's CV is uploaded and remembered");
+  assert.ok(state.pdfMeta[0].includes(`"linkedinUrl":"https://www.linkedin.com/talent/profile/new1?project=${BUSY.jobId}"`),
+    "the CV should carry the candidate's Recruiter profile link:" + state.pdfMeta[0].slice(0, 300));
+  console.log("ok    the CV in Drive carries the candidate's profile link (appProperties.linkedinUrl)");
 
   let s = readState();
   assert.strictEqual(s.misses[KEY("none1")], 1,
