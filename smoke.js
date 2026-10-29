@@ -366,7 +366,7 @@ const readState = () => JSON.parse(state.driveFiles["_cv-downloader-state-linked
 const readLedger = () => JSON.parse(state.driveFiles["_cv-downloader-ledger.json"] || "{}");
 
 const withMiss = () => ({
-  urls: [{ name: "María Muñoz", url: "https://media.example/a.pdf", key: KEY("new1") }],
+  urls: [{ name: "María Muñoz", url: "https://media.example/a.pdf", key: KEY("new1"), loc: "São Paulo, São Paulo, Brazil" }],
   skipped: 1,
   failedItems: [{ name: "No Resume Person", key: KEY("none1"),
                   href: "https://www.linkedin.com/talent/profile/none1" }],
@@ -402,6 +402,9 @@ const withMiss = () => ({
   assert.ok(state.pdfMeta[0].includes(`"linkedinUrl":"https://www.linkedin.com/talent/profile/new1?project=${BUSY.jobId}"`),
     "the CV should carry the candidate's Recruiter profile link:" + state.pdfMeta[0].slice(0, 300));
   console.log("ok    the CV in Drive carries the candidate's profile link (appProperties.linkedinUrl)");
+  assert.ok(state.pdfMeta[0].includes('"country":"Brazil"') && state.pdfMeta[0].includes('"city":"São Paulo"'),
+    "the CV should carry country and city:" + state.pdfMeta[0].slice(0, 300));
+  console.log("ok    the CV in Drive carries country and city from the row's location");
 
   let s = readState();
   assert.strictEqual(s.misses[KEY("none1")], 1,

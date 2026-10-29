@@ -49,6 +49,14 @@ Drive file's `appProperties`, key `linkedinUrl`
 to open; the public `linkedin.com/in/...` address is not on the list page, so it is not saved.
 The shared ledger is unchanged.
 
+## Since 5.33: country and city on each CV
+
+Each CV also carries `country` and `city` in the Drive file's `appProperties`, read from the
+location line on the applicants list ("City, Region, Country": last part = country, first part =
+city when there are two or more). No location on the row, or a value over Drive's 124-byte
+limit, means that key is simply left off. People rescued from their profile page get the
+location from their list row too. The shared ledger is unchanged.
+
 ## What changed from 4.0
 
 | | 4.0 | 5.0 |

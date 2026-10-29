@@ -451,7 +451,7 @@ async function run(tab, fullRescan) {
         await navigate(tab.id,
           `https://www.linkedin.com/talent/profile/${profileId}/attachments?project=${projectId}`);
         const pdf = await inject(tab.id, findAttachmentPdf);
-        if (pdf) res.urls.push({ name: item.name, url: pdf, key: item.key });
+        if (pdf) res.urls.push({ name: item.name, url: pdf, key: item.key, loc: item.loc });
         else emptyHanded.push(item);
       }
 
@@ -461,7 +461,7 @@ async function run(tab, fullRescan) {
         const filename = `${safeName(item.name) || "resume"}.pdf`;
         const [pj, pf] = String(item.key || "").split(":");
         const profileUrl = pf ? `https://www.linkedin.com/talent/profile/${pf}?project=${pj}` : "";
-        const ok = folderId ? await uploadToDrive(item.url, filename, folderId, profileUrl) : false;
+        const ok = folderId ? await uploadToDrive(item.url, filename, folderId, profileUrl, item.loc) : false;
         if (ok) {
           uploaded++;
         } else {
@@ -998,7 +998,19 @@ async function getOrCreateChild(parentId, name) {
 
 // Fetches the signed LinkedIn PDF and multipart-uploads it into the folder.
 // The Recruiter profile link rides along as appProperties.linkedinUrl.
-async function uploadToDrive(pdfUrl, filename, folderId, profileUrl) {
+// "City, Region, Country" -> {city, country}. The last part is the country, the
+// first the city (only when there are two or more). A value over Drive's
+// 124-byte key+value limit is dropped, never allowed to fail the upload.
+function locationProps(loc) {
+  const parts = String(loc || "").split(",").map(x => x.trim()).filter(Boolean);
+  const out = {};
+  const add = (k, v) => { if (v && (k + v).length < 60 && new TextEncoder().encode(k + v).length <= 124) out[k] = v; };
+  if (parts.length) add("country", parts[parts.length - 1]);
+  if (parts.length > 1) add("city", parts[0]);
+  return out;
+}
+
+async function uploadToDrive(pdfUrl, filename, folderId, profileUrl, loc) {
   try {
     let res = await fetch(pdfUrl);
     if (!res.ok) res = await fetch(pdfUrl, { credentials: "include" });
@@ -1007,7 +1019,7 @@ async function uploadToDrive(pdfUrl, filename, folderId, profileUrl) {
 
     const boundary = "cvdl" + folderId.slice(0, 8) + filename.length;
     const meta = JSON.stringify({ name: filename, parents: [folderId],
-      ...(profileUrl && { appProperties: { linkedinUrl: profileUrl } }) });
+      appProperties: { ...(profileUrl && { linkedinUrl: profileUrl }), ...locationProps(loc) } });
     const body = new Blob([
       `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n`,
       `--${boundary}\r\nContent-Type: application/pdf\r\n\r\n`,
@@ -1425,6 +1437,16 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     return "";
   }
 
+  // "City, Region, Country" as the row shows it. Read-only and best effort: any
+  // trouble means "", and a blank location never stops a CV being taken.
+  function getLocation(el) {
+    try {
+      const row = el.closest("li");
+      const loc = row && row.querySelector("[data-test-row-lockup-location]");
+      return loc ? (loc.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120) : "";
+    } catch (e) { return ""; }
+  }
+
   function getRowId(el) {
     let row = el;
     for (let i = 0; i < 12 && row; i++) {
@@ -1596,6 +1618,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     seen.add(id);
     const key = `${projectId}:${id}`;
     const name = getName(link, `Applicant ${++anon}`);
+    const loc = getLocation(link);
 
     if (skip.has(key)) {
       skipped++;
@@ -1612,7 +1635,7 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     console.log(`[page ${page}] ${name}`);
 
     const directHref = link.href && PDF_RE.test(link.href) ? link.href : null;
-    if (directHref) { urls.push({ name, url: directHref, key }); return false; }
+    if (directHref) { urls.push({ name, url: directHref, key, loc }); return false; }
 
     // Rare path. Almost every row's Resume control is already a direct link,
     // handled above without opening anything. This is for the ones that
@@ -1636,10 +1659,10 @@ async function scrapeResumes(skipKeys, knownStreakStop, vouchedClean, applicants
     }
 
     if (found) {
-      urls.push({ name, url: found, key });
+      urls.push({ name, url: found, key, loc });
     } else {
       console.log(`Failed to capture PDF for ${name}`);
-      failedItems.push({ name, key, href: getProfileHref(link) });
+      failedItems.push({ name, key, loc, href: getProfileHref(link) });
     }
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', keyCode: 27, bubbles: true }));
