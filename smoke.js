@@ -316,6 +316,16 @@ const SOURCE_SUB = "LinkedIn";
   assert.strictEqual(resolveFolder("Project Coordinatr",
     new Map([["Project Coordinator", "a"], ["Project Coordinater", "b"]])), null,
     "a title one letter from two folders: no guess");
+  {
+    const sdr = new Map([["Sales Development Representative", "open"],
+      ["Sales Development Representative (Hawk Ridge, closed)", "old"],
+      ["Sales Develpment Representative.", "pds"]]);
+    assert.strictEqual(resolveFolder("Sales Development Representative – B2B Sales", sdr), "open",
+      "the B2B Sales post goes to the one open SDR folder");
+    assert.strictEqual(resolveFolder("Sales Development Representative – B2B Sales",
+      new Map([...sdr, ["Sales Development Representative ", "twin"]])), null,
+      "two plain SDR folders: still no guess");
+  }
   assert.strictEqual(resolveFolder("Diseñador Gráfico", new Map([["Disenador Grafico", "a"]])), "a",
     "accents don't count");
   assert.strictEqual(resolveFolder("CEO Assistant", new Map([["SEO Assistant", "a"]])), null,

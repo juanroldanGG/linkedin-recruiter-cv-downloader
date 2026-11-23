@@ -37,7 +37,10 @@ const ALIASES = {
   "Software Engineer in Test": "SDET",
   "UX Designer": "UI/UX Designer",
   "Netsuite Administrator": "Netsuite Admin",
-  "Customer Success Specialist": "Customer Success Manager"
+  "Customer Success Specialist": "Customer Success Manager",
+  // Tanya's LinkedIn post (Nov 2026). Only safe while one folder has the plain
+  // SDR name: closed roles' folders get "(client, closed)" added to theirs.
+  "Sales Development Representative – B2B Sales": "Sales Development Representative"
 };
 
 // Files go into <role>/LinkedIn/, not <role>/ — each role folder keeps one
